@@ -1,0 +1,6 @@
+<resources>
+    <color name="launcher_bg">#0A0A0A</color>
+    <color name="primary">#FFFFFF</color>
+    <color name="surface_dark">#111114</color>
+    <color name="background_dark">#000000</color>
+</resources>

@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 390 844" width="390" height="844">
+  <defs>
+    <radialGradient id="auraTop" cx="25%" cy="22%" r="60%">
+      <stop offset="0%" stop-color="#7C3AED" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="auraBot" cx="76%" cy="56%" r="58%">
+      <stop offset="0%" stop-color="#06B6D4" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="karaokeGlow" x="-25%" y="-40%" width="150%" height="180%">
+      <feGaussianBlur stdDeviation="5.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="waveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="68%" stop-color="#67E8F9"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.32"/>
+    </linearGradient>
+    <linearGradient id="barFill" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+
+  <!-- OLED Backdrop -->
+  <rect width="390" height="844" fill="#000000"/>
+  <rect width="390" height="844" fill="url(#auraTop)"/>
+  <rect width="390" height="844" fill="url(#auraBot)"/>
+
+  <!-- Grab Handle -->
+  <rect x="176" y="20" width="38" height="4" rx="2" fill="#FFFFFF" fill-opacity="0.30"/>
+
+  <!-- Top Bar -->
+  <path d="M36 52 L44 60 L52 52" fill="none" stroke="#FFFFFF" stroke-opacity="0.85" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="135" y="45" width="120" height="22" rx="11" fill="#FFFFFF" fill-opacity="0.10"/>
+  <text x="195" y="60" fill="#FFFFFF" fill-opacity="0.88" font-family="sans-serif" font-size="10.5" font-weight="600" text-anchor="middle">AAC • 320 kbps</text>
+  <rect x="332" y="44" width="26" height="24" rx="6" fill="#FFFFFF" fill-opacity="0.14"/>
+  <text x="345" y="60" fill="#FFFFFF" font-family="sans-serif" font-size="11" font-weight="700" text-anchor="middle">L</text>
+
+  <!-- Sync Offset & Translate Control Strip -->
+  <rect x="28" y="92" width="166" height="28" rx="14" fill="#FFFFFF" fill-opacity="0.08"/>
+  <text x="52" y="110" fill="#FFFFFF" fill-opacity="0.78" font-family="sans-serif" font-size="11" font-weight="600" text-anchor="middle">-0.25s</text>
+  <text x="111" y="110" fill="#22D3EE" font-family="sans-serif" font-size="11" font-weight="700" text-anchor="middle">Sync Offset</text>
+  <text x="169" y="110" fill="#FFFFFF" fill-opacity="0.78" font-family="sans-serif" font-size="11" font-weight="600" text-anchor="middle">+0.25s</text>
+
+  <rect x="272" y="92" width="90" height="28" rx="14" fill="#FFFFFF" fill-opacity="0.09"/>
+  <text x="317" y="110" fill="#FFFFFF" font-family="sans-serif" font-size="11" font-weight="600" text-anchor="middle">Translate</text>
+
+  <!-- Center-Focused Karaoke Spotlight Stage (Zero Blur) -->
+  <!-- Previous Context Line -->
+  <text x="195" y="290" fill="#FFFFFF" fill-opacity="0.28" font-family="sans-serif" font-size="17" font-weight="600" text-anchor="middle">Beneath the quiet midnight rain</text>
+
+  <!-- Active Glowing + Bouncing Wave Lyric Line -->
+  <g filter="url(#karaokeGlow)" font-family="sans-serif" font-size="25" font-weight="700" text-anchor="middle">
+    <text x="195" y="370" fill="url(#waveGrad)">
+      <tspan dy="0">We</tspan>
+      <tspan dy="0"> </tspan>
+      <tspan dy="-3">find</tspan>
+      <tspan dy="3"> </tspan>
+      <tspan dy="-5" fill="#FFFFFF">our</tspan>
+      <tspan dy="5"> </tspan>
+      <tspan dy="-4" fill="#67E8F9">rhythm</tspan>
+      <tspan dy="4"> </tspan>
+      <tspan dy="0" fill="#FFFFFF" fill-opacity="0.34">in the dark</tspan>
+    </text>
+  </g>
+  <text x="195" y="405" fill="#67E8F9" fill-opacity="0.90" font-family="sans-serif" font-size="14" font-weight="600" text-anchor="middle">yozora no rizumu ga hibiku</text>
+
+  <!-- Animated 3-Dot Vocal Entry Cue -->
+  <circle cx="171" cy="442" r="7" fill="#22D3EE" fill-opacity="0.24"/>
+  <circle cx="171" cy="442" r="4" fill="#FFFFFF" fill-opacity="0.95"/>
+  <circle cx="195" cy="438" r="9" fill="#22D3EE" fill-opacity="0.35"/>
+  <circle cx="195" cy="438" r="4.6" fill="#FFFFFF"/>
+  <circle cx="219" cy="443" r="6" fill="#22D3EE" fill-opacity="0.18"/>
+  <circle cx="219" cy="443" r="3.8" fill="#FFFFFF" fill-opacity="0.58"/>
+
+  <!-- Upcoming Context Lines (Dimmed Cleanly, Zero Blur) -->
+  <text x="195" y="498" fill="#FFFFFF" fill-opacity="0.38" font-family="sans-serif" font-size="18" font-weight="600" text-anchor="middle">Chasing every fading star</text>
+  <text x="195" y="534" fill="#FFFFFF" fill-opacity="0.18" font-family="sans-serif" font-size="15" font-weight="500" text-anchor="middle">Till the morning light arrives</text>
+
+  <!-- Track Title + Controls Bottom Section -->
+  <text x="28" y="646" fill="#FFFFFF" font-family="sans-serif" font-size="20" font-weight="700">Midnight Echoes</text>
+  <text x="28" y="668" fill="#FFFFFF" fill-opacity="0.65" font-family="sans-serif" font-size="14" font-weight="500">Aetheris</text>
+
+  <!-- Thin Kinetic Progress Scrubber -->
+  <rect x="28" y="694" width="334" height="5.5" rx="2.75" fill="#FFFFFF" fill-opacity="0.22"/>
+  <rect x="28" y="694" width="142" height="5.5" rx="2.75" fill="url(#barFill)"/>
+  <text x="28" y="716" fill="#FFFFFF" fill-opacity="0.55" font-family="sans-serif" font-size="11">1:42</text>
+  <text x="362" y="716" fill="#FFFFFF" fill-opacity="0.55" font-family="sans-serif" font-size="11" text-anchor="end">3:58</text>
+
+  <!-- Transport Row -->
+  <circle cx="195" cy="766" r="32" fill="#FFFFFF"/>
+  <rect x="186" y="754" width="5.5" height="24" rx="2" fill="#000000"/>
+  <rect x="198.5" y="754" width="5.5" height="24" rx="2" fill="#000000"/>
+  <path d="M114 756 L114 776 M116 766 L130 756 L130 776 Z" fill="#FFFFFF"/>
+  <path d="M276 756 L276 776 M274 766 L260 756 L260 776 Z" fill="#FFFFFF"/>
+</svg>
