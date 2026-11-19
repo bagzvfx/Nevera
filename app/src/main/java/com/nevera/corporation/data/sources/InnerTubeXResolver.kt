@@ -135,6 +135,7 @@ object InnerTubeXResolver {
 
         val quality = when {
             maxKbps <= 96 -> AudioQuality.LOW
+            maxKbps >= 160 -> AudioQuality.HIGH
             else -> AudioQuality.AUTO
         }
 
@@ -169,8 +170,12 @@ object InnerTubeXResolver {
                         url = stream.audioUrl,
                         codec = codec,
                         kbps = kbps,
-                        qualityLabel = "HQ Audio • $kbps kbps $codec",
-                        headers = stream.headers
+                        qualityLabel = "Studio $codec • $kbps kbps",
+                        headers = stream.headers,
+                        sampleRateHz = if (codec == "Opus") 48000 else 44100,
+                        bitDepth = 0,
+                        isLossless = false,
+                        originLabel = "Master Studio Stream"
                     )
                 }
             }

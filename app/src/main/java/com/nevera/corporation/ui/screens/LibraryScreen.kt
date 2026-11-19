@@ -28,12 +28,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.nevera.corporation.data.model.NetworkServerConfig
 import com.nevera.corporation.data.model.Song
 import com.nevera.corporation.data.model.UserPlaylist
 import com.nevera.corporation.data.sources.AccountSyncManager
+import com.nevera.corporation.data.sources.ServerBrowseEntry
 import com.nevera.corporation.data.store.LibraryStore
 import com.nevera.corporation.data.store.LocalMediaRepository
+import com.nevera.corporation.data.store.NetworkStorageRepository
 import com.nevera.corporation.download.OfflineDownloadManager
+import com.nevera.corporation.ui.components.NetworkStorageManagerDialog
 import com.nevera.corporation.ui.components.PlaylistImportDialog
 import com.nevera.corporation.ui.components.SongRow
 import com.nevera.corporation.ui.components.YouTubeLoginSyncDialog
@@ -49,7 +53,9 @@ enum class LibrarySection {
     LIKED,
     DOWNLOADS,
     LOCAL,
-    PLAYLISTS
+    PLAYLISTS,
+    SERVERS,
+    RECAP
 }
 
 @Composable
@@ -73,9 +79,18 @@ fun LibraryScreen(
     val downloadProgress by OfflineDownloadManager.downloadProgress.collectAsState()
     val playlists by LibraryStore.playlists.collectAsState()
     val isAccountSignedIn by AccountSyncManager.isSignedIn.collectAsState()
+    val networkServers by NetworkStorageRepository.servers.collectAsState()
+    val artistPlayCounts by LibraryStore.artistPlayCounts.collectAsState()
+    val songPlayCounts by LibraryStore.songPlayCounts.collectAsState()
+    val recentlyPlayed by LibraryStore.recentlyPlayed.collectAsState()
 
     var localSongs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<UserPlaylist?>(null) }
+    var selectedServer by remember { mutableStateOf<NetworkServerConfig?>(null) }
+    var serverPathStack by remember { mutableStateOf<List<String>>(emptyList()) }
+    var serverEntries by remember { mutableStateOf<List<ServerBrowseEntry>>(emptyList()) }
+    var isLoadingServer by remember { mutableStateOf(false) }
+    var showServerDialog by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showLoginSyncDialog by remember { mutableStateOf(false) }
@@ -133,7 +148,9 @@ fun LibraryScreen(
             LibrarySection.LIKED to strings.likedTab,
             LibrarySection.DOWNLOADS to strings.downloadsTab,
             LibrarySection.LOCAL to strings.localTab,
-            LibrarySection.PLAYLISTS to strings.playlistsTab
+            LibrarySection.PLAYLISTS to strings.playlistsTab,
+            LibrarySection.SERVERS to strings.serversTab,
+            LibrarySection.RECAP to strings.recapTab
         )
         LazyRow(
             contentPadding = PaddingValues(horizontal = 20.dp),
@@ -356,7 +373,264 @@ fun LibraryScreen(
                     }
                 }
             }
+
+            LibrarySection.SERVERS -> {
+                val activeSrv = selectedServer?.let { sel -> networkServers.find { it.id == sel.id } }
+                LaunchedEffect(activeSrv?.id, serverPathStack) {
+                    if (activeSrv != null) {
+                        isLoadingServer = true
+                        serverEntries = NetworkStorageRepository.browse(activeSrv, serverPathStack.lastOrNull().orEmpty())
+                        isLoadingServer = false
+                    }
+                }
+
+                if (activeSrv != null) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = {
+                                if (serverPathStack.isNotEmpty()) {
+                                    serverPathStack = serverPathStack.dropLast(1)
+                                } else {
+                                    selectedServer = null
+                                    serverEntries = emptyList()
+                                }
+                            }) {
+                                Icon(Icons.Rounded.ArrowBack, strings.close, tint = Color.White)
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(activeSrv.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                val sub = serverPathStack.lastOrNull().orEmpty()
+                                Text(
+                                    if (sub.isBlank()) activeSrv.type.label else "/$sub",
+                                    color = NeveraTextSecondary,
+                                    fontSize = 11.sp,
+                                    maxLines = 1
+                                )
+                            }
+                            val playableSongs = serverEntries.mapNotNull { it.song }
+                            if (playableSongs.isNotEmpty()) {
+                                Button(
+                                    onClick = { onSongClick(playableSongs.first(), playableSongs) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
+                                    shape = RoundedCornerShape(20.dp)
+                                ) {
+                                    Text(strings.playAll, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                }
+                            }
+                        }
+
+                        if (isLoadingServer) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = accentColor)
+                            }
+                        } else if (serverEntries.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("No lossless tracks found in this folder.", color = NeveraTextSecondary)
+                            }
+                        } else {
+                            val playableSongs = remember(serverEntries) { serverEntries.mapNotNull { it.song } }
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(bottom = 170.dp)
+                            ) {
+                                items(serverEntries, key = { "srv_${it.isDirectory}_${it.path}_${it.name}" }) { entry ->
+                                    if (entry.isDirectory) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { serverPathStack = serverPathStack + entry.path }
+                                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(Icons.Rounded.Folder, null, tint = accentColor, modifier = Modifier.size(28.dp))
+                                            Spacer(modifier = Modifier.width(14.dp))
+                                            Text(entry.name, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                                            Icon(Icons.Rounded.ChevronRight, null, tint = NeveraTextSecondary)
+                                        }
+                                    } else if (entry.song != null) {
+                                        SongRow(
+                                            song = entry.song,
+                                            isPlaying = currentSong?.id == entry.song.id && isPlaying,
+                                            isCurrent = currentSong?.id == entry.song.id,
+                                            isDownloaded = downloadedSongs.any { it.id == entry.song.id },
+                                            downloadProgress = downloadProgress[entry.song.id],
+                                            onClick = { onSongClick(entry.song, playableSongs) },
+                                            onPlayNext = { onPlayNext(entry.song) },
+                                            onAddToQueue = { onAddToQueue(entry.song) },
+                                            onDownloadClick = { OfflineDownloadManager.download(entry.song) },
+                                            onAddToPlaylistClick = { onAddToPlaylist(entry.song) },
+                                            onToggleLike = { LibraryStore.toggleLike(entry.song) },
+                                            isLiked = likedSongs.any { it.id == entry.song.id }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 170.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        item(key = "srv_add") {
+                            ActionPillButton(
+                                icon = Icons.Rounded.Dns,
+                                label = "Add Subsonic / WebDAV Lossless Server",
+                                modifier = Modifier.fillMaxWidth(),
+                                onClick = { showServerDialog = true }
+                            )
+                        }
+                        if (networkServers.isEmpty()) {
+                            item(key = "srv_empty") {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 36.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(Icons.Rounded.CloudQueue, null, tint = Color.White.copy(alpha = 0.45f), modifier = Modifier.size(44.dp))
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text("Stream Lossless Without Downloading", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        "Connect Navidrome, Jellyfin (Subsonic), or a WebDAV/NAS folder to stream FLAC & Hi-Res directly.",
+                                        color = NeveraTextSecondary,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        } else {
+                            items(networkServers, key = { it.id }) { srv ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(Color(0xFF14141A))
+                                        .clickable {
+                                            selectedServer = srv
+                                            serverPathStack = emptyList()
+                                        }
+                                        .padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Rounded.Dns, null, tint = accentColor, modifier = Modifier.size(26.dp))
+                                    Spacer(modifier = Modifier.width(14.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(srv.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                        Text("${srv.type.label} • ${srv.baseUrl}", color = NeveraTextSecondary, fontSize = 11.sp, maxLines = 1)
+                                    }
+                                    Icon(Icons.Rounded.ChevronRight, null, tint = NeveraTextSecondary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            LibrarySection.RECAP -> {
+                val totalPlays = songPlayCounts.values.sum()
+                val topArtists = remember(artistPlayCounts) {
+                    artistPlayCounts.entries.sortedByDescending { it.value }.take(6)
+                }
+                val topSongs = remember(songPlayCounts, recentlyPlayed, likedSongs) {
+                    val catalog = (recentlyPlayed + likedSongs).associateBy { it.id }
+                    songPlayCounts.entries
+                        .sortedByDescending { it.value }
+                        .mapNotNull { (id, cnt) -> catalog[id]?.let { it to cnt } }
+                        .take(8)
+                }
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 170.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    item(key = "recap_summary") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            RecapStatCard("Total Plays", totalPlays.toString(), accentColor, Modifier.weight(1f))
+                            RecapStatCard("Top Artists", artistPlayCounts.size.toString(), accentColor, Modifier.weight(1f))
+                            RecapStatCard("Liked", likedSongs.size.toString(), accentColor, Modifier.weight(1f))
+                        }
+                    }
+
+                    if (topArtists.isNotEmpty()) {
+                        item(key = "recap_artists_hdr") {
+                            Text("Top Artists", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+                        val maxCount = topArtists.first().value.coerceAtLeast(1)
+                        items(topArtists, key = { "ra_${it.key}" }) { (artist, count) ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF14141A))
+                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(artist, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                    Text("$count plays", color = NeveraTextSecondary, fontSize = 12.sp)
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(5.dp)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(Color.White.copy(alpha = 0.08f))
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth((count.toFloat() / maxCount.toFloat()).coerceIn(0.08f, 1f))
+                                            .fillMaxHeight()
+                                            .clip(RoundedCornerShape(3.dp))
+                                            .background(accentColor)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (topSongs.isNotEmpty()) {
+                        item(key = "recap_songs_hdr") {
+                            Text("Most Played Tracks", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+                        val songList = topSongs.map { it.first }
+                        items(topSongs, key = { "rs_${it.first.id}" }) { (track, _) ->
+                            SongRow(
+                                song = track,
+                                isPlaying = currentSong?.id == track.id && isPlaying,
+                                isCurrent = currentSong?.id == track.id,
+                                isDownloaded = downloadedSongs.any { it.id == track.id },
+                                downloadProgress = downloadProgress[track.id],
+                                onClick = { onSongClick(track, songList) },
+                                onPlayNext = { onPlayNext(track) },
+                                onAddToQueue = { onAddToQueue(track) },
+                                onDownloadClick = { OfflineDownloadManager.download(track) },
+                                onAddToPlaylistClick = { onAddToPlaylist(track) },
+                                onToggleLike = { LibraryStore.toggleLike(track) },
+                                isLiked = likedSongs.any { it.id == track.id }
+                            )
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    if (showServerDialog) {
+        NetworkStorageManagerDialog(
+            accentColor = accentColor,
+            onDismiss = { showServerDialog = false }
+        )
     }
 
     if (showCreateDialog) {
@@ -395,6 +669,27 @@ fun LibraryScreen(
             onSynced = { selectedSection = LibrarySection.PLAYLISTS },
             onDismiss = { showLoginSyncDialog = false }
         )
+    }
+}
+
+@Composable
+private fun RecapStatCard(
+    label: String,
+    value: String,
+    accentColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF15151B))
+            .border(0.6.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(14.dp))
+            .padding(vertical = 14.dp, horizontal = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(value, color = accentColor, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(label, color = NeveraTextSecondary, fontSize = 11.sp)
     }
 }
 

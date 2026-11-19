@@ -114,7 +114,10 @@ class MainActivity : ComponentActivity() {
             val repeatMode by playerConnection.repeatMode.collectAsState()
             val shuffleEnabled by playerConnection.shuffleEnabled.collectAsState()
             val playbackSpeed by playerConnection.playbackSpeed.collectAsState()
+            val playbackPitch by playerConnection.playbackPitch.collectAsState()
+            val tuning432Hz by playerConnection.tuning432Hz.collectAsState()
             val sleepTimerMs by playerConnection.sleepTimerRemainingMs.collectAsState()
+            val sleepTimerEndOfTrack by playerConnection.sleepTimerEndOfTrack.collectAsState()
             val eqPresets by playerConnection.eqPresets.collectAsState()
             val selectedEqPreset by playerConnection.selectedEqPreset.collectAsState()
             val errorBanner by playerConnection.errorBanner.collectAsState()
@@ -403,6 +406,7 @@ class MainActivity : ComponentActivity() {
                         ) {
                             SettingsScreen(
                                 accentColor = artworkColors.primary,
+                                onUpdateDspProfile = { playerConnection.updateDspProfile(it) },
                                 onBack = { showSettings = false }
                             )
                         }
@@ -430,7 +434,10 @@ class MainActivity : ComponentActivity() {
                                     repeatMode = repeatMode,
                                     shuffleEnabled = shuffleEnabled,
                                     playbackSpeed = playbackSpeed,
+                                    playbackPitch = playbackPitch,
+                                    tuning432Hz = tuning432Hz,
                                     sleepTimerRemainingMs = sleepTimerMs,
+                                    sleepTimerEndOfTrack = sleepTimerEndOfTrack,
                                     eqPresets = eqPresets,
                                     selectedEqPreset = selectedEqPreset,
                                     isLiked = likedSongs.any { it.id == song.id },
@@ -442,10 +449,15 @@ class MainActivity : ComponentActivity() {
                                     onCycleRepeat = { playerConnection.cycleRepeatMode() },
                                     onToggleShuffle = { playerConnection.toggleShuffle() },
                                     onSetSpeed = { playerConnection.setPlaybackSpeed(it) },
-                                    onSetSleepTimer = { playerConnection.startSleepTimer(it) },
+                                    onSetPitch = { playerConnection.setPlaybackPitch(it) },
+                                    onSetTuning432Hz = { playerConnection.setTuning432Hz(it) },
+                                    onSetSleepTimer = { mins, endOfTrack -> playerConnection.startSleepTimer(mins, endOfTrack) },
                                     onSelectEqPreset = { playerConnection.selectEqualizerPreset(it) },
+                                    onUpdateDspProfile = { playerConnection.updateDspProfile(it) },
                                     onJumpQueueIndex = { playerConnection.jumpToQueueIndex(it) },
                                     onRemoveQueueIndex = { playerConnection.removeFromQueue(it) },
+                                    onMoveQueueItem = { from, to -> playerConnection.moveQueueItem(from, to) },
+                                    onSaveQueueAsPlaylist = { plName -> playerConnection.saveQueueAsPlaylist(plName) },
                                     onCollapse = { isPlayerExpanded = false }
                                 )
                             }

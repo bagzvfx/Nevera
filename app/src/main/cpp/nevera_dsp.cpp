@@ -8,8 +8,342 @@
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
+constexpr double kPiD = 3.14159265358979323846;
 constexpr int kFftSize = 512;
 constexpr int kNumBands = 32;
+constexpr int kDspBands = 10;
+
+struct Biquad64 {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+    double a1 = 0.0, a2 = 0.0;
+    double z1 = 0.0, z2 = 0.0;
+    bool active = false;
+
+    void reset() {
+        z1 = 0.0;
+        z2 = 0.0;
+    }
+
+    void setIdentity() {
+        b0 = 1.0; b1 = 0.0; b2 = 0.0;
+        a1 = 0.0; a2 = 0.0;
+        active = false;
+    }
+
+    // kind: 0 = LowShelf, 1 = Peaking, 2 = HighShelf
+    void configure(int kind, double sampleRate, double freqHz, double gainDb, double q) {
+        if (sampleRate <= 1000.0 || std::abs(gainDb) < 0.02) {
+            setIdentity();
+            return;
+        }
+        const double safeF = std::clamp(freqHz, 18.0, sampleRate * 0.45);
+        const double safeQ = std::clamp(q, 0.35, 8.0);
+        const double safeG = std::clamp(gainDb, -15.0, 15.0);
+
+        const double A = std::pow(10.0, safeG / 40.0);
+        const double w0 = 2.0 * kPiD * safeF / sampleRate;
+        const double cosW = std::cos(w0);
+        const double sinW = std::sin(w0);
+        const double alpha = sinW / (2.0 * safeQ);
+
+        double nb0 = 1.0, nb1 = 0.0, nb2 = 0.0;
+        double na0 = 1.0, na1 = 0.0, na2 = 0.0;
+
+        if (kind == 0) {
+            // Low Shelf
+            const double twoSqrtAAlpha = 2.0 * std::sqrt(A) * (sinW / 2.0) * std::sqrt((A + 1.0 / A) * (1.0 / std::clamp(safeQ, 0.4, 2.0) - 1.0) + 2.0);
+            const double shelfAlpha = std::isfinite(twoSqrtAAlpha) ? twoSqrtAAlpha : (2.0 * std::sqrt(A) * alpha);
+            nb0 = A * ((A + 1.0) - (A - 1.0) * cosW + shelfAlpha);
+            nb1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosW);
+            nb2 = A * ((A + 1.0) - (A - 1.0) * cosW - shelfAlpha);
+            na0 = (A + 1.0) + (A - 1.0) * cosW + shelfAlpha;
+            na1 = -2.0 * ((A - 1.0) + (A + 1.0) * cosW);
+            na2 = (A + 1.0) + (A - 1.0) * cosW - shelfAlpha;
+        } else if (kind == 2) {
+            // High Shelf
+            const double twoSqrtAAlpha = 2.0 * std::sqrt(A) * (sinW / 2.0) * std::sqrt((A + 1.0 / A) * (1.0 / std::clamp(safeQ, 0.4, 2.0) - 1.0) + 2.0);
+            const double shelfAlpha = std::isfinite(twoSqrtAAlpha) ? twoSqrtAAlpha : (2.0 * std::sqrt(A) * alpha);
+            nb0 = A * ((A + 1.0) + (A - 1.0) * cosW + shelfAlpha);
+            nb1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosW);
+            nb2 = A * ((A + 1.0) + (A - 1.0) * cosW - shelfAlpha);
+            na0 = (A + 1.0) - (A - 1.0) * cosW + shelfAlpha;
+            na1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosW);
+            na2 = (A + 1.0) - (A - 1.0) * cosW - shelfAlpha;
+        } else {
+            // Peaking EQ
+            nb0 = 1.0 + alpha * A;
+            nb1 = -2.0 * cosW;
+            nb2 = 1.0 - alpha * A;
+            na0 = 1.0 + alpha / A;
+            na1 = -2.0 * cosW;
+            na2 = 1.0 - alpha / A;
+        }
+
+        if (std::abs(na0) < 1e-12) {
+            setIdentity();
+            return;
+        }
+        b0 = nb0 / na0;
+        b1 = nb1 / na0;
+        b2 = nb2 / na0;
+        a1 = na1 / na0;
+        a2 = na2 / na0;
+        active = true;
+    }
+
+    inline double process(double x) {
+        if (!active) return x;
+        const double y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
+
+    double responseDb(double freqHz, double sampleRate) const {
+        if (!active || sampleRate <= 1000.0) return 0.0;
+        const double w = 2.0 * kPiD * freqHz / sampleRate;
+        const double cw = std::cos(w);
+        const double sw = std::sin(w);
+        const double c2w = std::cos(2.0 * w);
+        const double s2w = std::sin(2.0 * w);
+
+        const double numR = b0 + b1 * cw + b2 * c2w;
+        const double numI = -b1 * sw - b2 * s2w;
+        const double denR = 1.0 + a1 * cw + a2 * c2w;
+        const double denI = -a1 * sw - a2 * s2w;
+
+        const double numSq = numR * numR + numI * numI;
+        const double denSq = std::max(1e-18, denR * denR + denI * denI);
+        return 10.0 * std::log10(std::max(1e-18, numSq / denSq));
+    }
+};
+
+struct NeveraStudioDsp {
+    double sampleRate = 48000.0;
+    int channels = 2;
+
+    bool enabled = true;
+    bool bitPerfectBypass = false;
+    bool autoPreamp = true;
+    bool lufsNorm = true;
+
+    double preampLinear = 1.0;
+    double stereoWidth = 1.0;
+    double balL = 1.0;
+    double balR = 1.0;
+    double tubeWarmth = 0.0;
+    double targetLufsLinear = 0.20; // ~ -14 LUFS RMS proxy
+
+    // 10-band stereo biquads
+    Biquad64 eqL[kDspBands];
+    Biquad64 eqR[kDspBands];
+
+    // BS2B crossfeed state
+    bool crossfeedActive = false;
+    double cfLpA0 = 0.0, cfLpB1 = 0.0;
+    double cfCrossGain = 0.0;
+    double cfDirectGain = 1.0;
+    double cfStateL = 0.0, cfStateR = 0.0;
+
+    // EBU R128 loudness integrator & DC blocker
+    double lufsEnergy = 0.04;
+    double lufsGain = 1.0;
+    double dcPrevInL = 0.0, dcPrevOutL = 0.0;
+    double dcPrevInR = 0.0, dcPrevOutR = 0.0;
+
+    // True-peak soft-knee limiter state
+    double limEnv = 0.0;
+
+    void init(int sr, int ch) {
+        sampleRate = static_cast<double>(std::max(8000, sr));
+        channels = std::clamp(ch, 1, 8);
+        reset();
+    }
+
+    void reset() {
+        for (int i = 0; i < kDspBands; ++i) {
+            eqL[i].reset();
+            eqR[i].reset();
+        }
+        cfStateL = 0.0;
+        cfStateR = 0.0;
+        lufsEnergy = 0.04;
+        lufsGain = 1.0;
+        dcPrevInL = dcPrevOutL = 0.0;
+        dcPrevInR = dcPrevOutR = 0.0;
+        limEnv = 0.0;
+    }
+
+    void updateConfig(
+            const float* params,
+            int paramCount,
+            const float* freqs,
+            const float* gains,
+            const float* qs,
+            int bandCount) {
+        if (paramCount < 11) return;
+        enabled = params[0] > 0.5f;
+        bitPerfectBypass = params[1] > 0.5f;
+        const double manualPreampDb = std::clamp(static_cast<double>(params[2]), -12.0, 6.0);
+        autoPreamp = params[3] > 0.5f;
+        const double cfFcut = static_cast<double>(params[4]);
+        const double cfFeedDb = static_cast<double>(params[5]);
+        stereoWidth = std::clamp(static_cast<double>(params[6]), 0.5, 1.6);
+        const double balance = std::clamp(static_cast<double>(params[7]), -1.0, 1.0);
+        tubeWarmth = std::clamp(static_cast<double>(params[8]), 0.0, 1.0);
+        lufsNorm = params[9] > 0.5f;
+        const double targetLufsDb = std::clamp(static_cast<double>(params[10]), -23.0, -9.0);
+        targetLufsLinear = std::pow(10.0, targetLufsDb / 20.0);
+
+        balL = (balance > 0.0) ? (1.0 - balance) : 1.0;
+        balR = (balance < 0.0) ? (1.0 + balance) : 1.0;
+
+        double maxPositiveGainDb = 0.0;
+        const int n = std::min(kDspBands, bandCount);
+        for (int i = 0; i < kDspBands; ++i) {
+            if (i < n) {
+                const int kind = (i == 0) ? 0 : ((i == kDspBands - 1) ? 2 : 1);
+                const double g = static_cast<double>(gains[i]);
+                if (g > maxPositiveGainDb) maxPositiveGainDb = g;
+                eqL[i].configure(kind, sampleRate, static_cast<double>(freqs[i]), g, static_cast<double>(qs[i]));
+                eqR[i].configure(kind, sampleRate, static_cast<double>(freqs[i]), g, static_cast<double>(qs[i]));
+            } else {
+                eqL[i].setIdentity();
+                eqR[i].setIdentity();
+            }
+        }
+
+        double effectivePreampDb = manualPreampDb;
+        if (autoPreamp && maxPositiveGainDb > 0.1) {
+            const double autoHeadroom = -(maxPositiveGainDb + 0.4);
+            effectivePreampDb = std::min(manualPreampDb, autoHeadroom);
+        }
+        preampLinear = std::pow(10.0, effectivePreampDb / 20.0);
+
+        // BS2B crossfeed
+        if (cfFcut > 50.0 && cfFeedDb > 0.1) {
+            crossfeedActive = true;
+            const double x = std::exp(-2.0 * kPiD * cfFcut / sampleRate);
+            cfLpA0 = 1.0 - x;
+            cfLpB1 = x;
+            cfCrossGain = std::pow(10.0, -cfFeedDb / 20.0);
+            cfDirectGain = 1.0 / (1.0 + cfCrossGain * 0.65);
+        } else {
+            crossfeedActive = false;
+            cfCrossGain = 0.0;
+            cfDirectGain = 1.0;
+        }
+    }
+
+    void processStereoInterleaved(float* buf, int frameCount) {
+        if (!enabled || bitPerfectBypass || frameCount <= 0) return;
+
+        const double limAttack = std::exp(-1.0 / (0.0005 * sampleRate));
+        const double limRelease = std::exp(-1.0 / (0.065 * sampleRate));
+        const double lufsAlpha = 1.0 - std::exp(-1.0 / (1.2 * sampleRate));
+        const double lufsGainSlew = 1.0 - std::exp(-1.0 / (0.35 * sampleRate));
+        const double dcCoeff = 1.0 - (2.0 * kPiD * 8.0 / sampleRate);
+        constexpr double kCeiling = 0.966; // -0.3 dBFS
+
+        if (channels == 1) {
+            for (int f = 0; f < frameCount; ++f) {
+                double x = static_cast<double>(buf[f]) * preampLinear;
+                for (int b = 0; b < kDspBands; ++b) x = eqL[b].process(x);
+                if (tubeWarmth > 0.01) {
+                    const double exc = x + tubeWarmth * 0.14 * (x * x - 0.5 * x * x * x);
+                    const double dcOut = exc - dcPrevInL + dcCoeff * dcPrevOutL;
+                    dcPrevInL = exc;
+                    dcPrevOutL = dcOut;
+                    x = dcOut;
+                }
+                const double absX = std::abs(x);
+                limEnv = (absX > limEnv)
+                        ? (limAttack * limEnv + (1.0 - limAttack) * absX)
+                        : (limRelease * limEnv + (1.0 - limRelease) * absX);
+                if (limEnv > kCeiling) {
+                    x *= (kCeiling / limEnv);
+                }
+                if (std::abs(x) > 0.985) {
+                    x = std::tanh(x) * 0.985;
+                }
+                buf[f] = std::isfinite(x) ? static_cast<float>(std::clamp(x, -0.99, 0.99)) : 0.0f;
+            }
+            return;
+        }
+
+        const int stride = channels;
+        for (int f = 0; f < frameCount; ++f) {
+            const int base = f * stride;
+            double l = static_cast<double>(buf[base]) * preampLinear;
+            double r = static_cast<double>(buf[base + 1]) * preampLinear;
+
+            // 1. 10-band 64-bit Parametric EQ cascade
+            for (int b = 0; b < kDspBands; ++b) {
+                l = eqL[b].process(l);
+                r = eqR[b].process(r);
+            }
+
+            // 2. BS2B Headphone Crossfeed
+            if (crossfeedActive) {
+                cfStateL = cfLpA0 * l + cfLpB1 * cfStateL;
+                cfStateR = cfLpA0 * r + cfLpB1 * cfStateR;
+                const double outL = l * cfDirectGain + cfStateR * cfCrossGain * cfDirectGain;
+                const double outR = r * cfDirectGain + cfStateL * cfCrossGain * cfDirectGain;
+                l = outL;
+                r = outR;
+            }
+
+            // 3. Mid-Side Stereo Width + L/R Channel Balance
+            if (std::abs(stereoWidth - 1.0) > 0.005 || balL < 0.999 || balR < 0.999) {
+                const double mid = 0.5 * (l + r);
+                const double side = 0.5 * (l - r) * stereoWidth;
+                l = (mid + side) * balL;
+                r = (mid - side) * balR;
+            }
+
+            // 4. EBU R128 Smooth Loudness Normalizer (with -55 dBFS silence gate)
+            if (lufsNorm) {
+                const double instPower = 0.5 * (l * l + r * r);
+                if (instPower > 3.16e-6) {
+                    lufsEnergy += lufsAlpha * (instPower - lufsEnergy);
+                    const double currentRms = std::sqrt(std::max(1e-8, lufsEnergy));
+                    const double desired = std::clamp(targetLufsLinear / currentRms, 0.40, 2.0);
+                    lufsGain += lufsGainSlew * (desired - lufsGain);
+                }
+                l *= lufsGain;
+                r *= lufsGain;
+            }
+
+            // 5. Subtle Analog Tube Warmth (even-harmonic + DC block)
+            if (tubeWarmth > 0.01) {
+                const double excL = l + tubeWarmth * 0.14 * (l * l - 0.5 * l * l * l);
+                const double excR = r + tubeWarmth * 0.14 * (r * r - 0.5 * r * r * r);
+                const double dcL = excL - dcPrevInL + dcCoeff * dcPrevOutL;
+                const double dcR = excR - dcPrevInR + dcCoeff * dcPrevOutR;
+                dcPrevInL = excL; dcPrevOutL = dcL;
+                dcPrevInR = excR; dcPrevOutR = dcR;
+                l = dcL;
+                r = dcR;
+            }
+
+            // 6. True-Peak Soft-Knee Limiter (-0.3 dBFS ceiling)
+            const double peak = std::max(std::abs(l), std::abs(r));
+            limEnv = (peak > limEnv)
+                    ? (limAttack * limEnv + (1.0 - limAttack) * peak)
+                    : (limRelease * limEnv + (1.0 - limRelease) * peak);
+            if (limEnv > kCeiling) {
+                const double gr = kCeiling / limEnv;
+                l *= gr;
+                r *= gr;
+            }
+            if (std::abs(l) > 0.985) l = std::tanh(l) * 0.985;
+            if (std::abs(r) > 0.985) r = std::tanh(r) * 0.985;
+
+            buf[base] = std::isfinite(l) ? static_cast<float>(std::clamp(l, -0.99, 0.99)) : 0.0f;
+            buf[base + 1] = std::isfinite(r) ? static_cast<float>(std::clamp(r, -0.99, 0.99)) : 0.0f;
+        }
+    }
+};
 
 inline bool isJapaneseKana(uint16_t ch) {
     return (ch >= 0x3040 && ch <= 0x309F) || (ch >= 0x30A0 && ch <= 0x30FF);
@@ -472,6 +806,122 @@ Java_com_nevera_corporation_data_native_NeveraNativeEngine_nativeDetectJapaneseS
     }
     env->ReleaseStringChars(input, chars);
     return mask;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_nevera_corporation_data_native_NeveraNativeEngine_nativeDspCreate(
+        JNIEnv* /* env */,
+        jobject /* thiz */,
+        jint sampleRate,
+        jint channels) {
+    auto* dsp = new NeveraStudioDsp();
+    dsp->init(static_cast<int>(sampleRate), static_cast<int>(channels));
+    return reinterpret_cast<jlong>(dsp);
+}
+
+JNIEXPORT void JNICALL
+Java_com_nevera_corporation_data_native_NeveraNativeEngine_nativeDspDestroy(
+        JNIEnv* /* env */,
+        jobject /* thiz */,
+        jlong handle) {
+    if (handle == 0) return;
+    auto* dsp = reinterpret_cast<NeveraStudioDsp*>(handle);
+    delete dsp;
+}
+
+JNIEXPORT void JNICALL
+Java_com_nevera_corporation_data_native_NeveraNativeEngine_nativeDspReset(
+        JNIEnv* /* env */,
+        jobject /* thiz */,
+        jlong handle) {
+    if (handle == 0) return;
+    auto* dsp = reinterpret_cast<NeveraStudioDsp*>(handle);
+    dsp->reset();
+}
+
+JNIEXPORT void JNICALL
+Java_com_nevera_corporation_data_native_NeveraNativeEngine_nativeDspUpdateConfig(
+        JNIEnv* env,
+        jobject /* thiz */,
+        jlong handle,
+        jfloatArray params,
+        jfloatArray freqs,
+        jfloatArray gains,
+        jfloatArray qs) {
+    if (handle == 0 || params == nullptr || freqs == nullptr || gains == nullptr || qs == nullptr) return;
+    auto* dsp = reinterpret_cast<NeveraStudioDsp*>(handle);
+    jsize pLen = env->GetArrayLength(params);
+    jsize bLen = std::min(env->GetArrayLength(freqs), std::min(env->GetArrayLength(gains), env->GetArrayLength(qs)));
+    jfloat* pPtr = env->GetFloatArrayElements(params, nullptr);
+    jfloat* fPtr = env->GetFloatArrayElements(freqs, nullptr);
+    jfloat* gPtr = env->GetFloatArrayElements(gains, nullptr);
+    jfloat* qPtr = env->GetFloatArrayElements(qs, nullptr);
+    dsp->updateConfig(pPtr, static_cast<int>(pLen), fPtr, gPtr, qPtr, static_cast<int>(bLen));
+    env->ReleaseFloatArrayElements(params, pPtr, JNI_ABORT);
+    env->ReleaseFloatArrayElements(freqs, fPtr, JNI_ABORT);
+    env->ReleaseFloatArrayElements(gains, gPtr, JNI_ABORT);
+    env->ReleaseFloatArrayElements(qs, qPtr, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
+Java_com_nevera_corporation_data_native_NeveraNativeEngine_nativeDspProcessFloatInterleaved(
+        JNIEnv* env,
+        jobject /* thiz */,
+        jlong handle,
+        jfloatArray interleaved,
+        jint frameCount) {
+    if (handle == 0 || interleaved == nullptr || frameCount <= 0) return;
+    auto* dsp = reinterpret_cast<NeveraStudioDsp*>(handle);
+    jfloat* ptr = env->GetFloatArrayElements(interleaved, nullptr);
+    const jsize arrLen = env->GetArrayLength(interleaved);
+    const int maxFrames = static_cast<int>(arrLen) / std::max(1, dsp->channels);
+    const int safeFrames = std::min(static_cast<int>(frameCount), maxFrames);
+    dsp->processStereoInterleaved(ptr, safeFrames);
+    env->ReleaseFloatArrayElements(interleaved, ptr, 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_nevera_corporation_data_native_NeveraNativeEngine_nativeDspComputeCurveDb(
+        JNIEnv* env,
+        jobject /* thiz */,
+        jfloatArray freqs,
+        jfloatArray gains,
+        jfloatArray qs,
+        jint sampleRate,
+        jfloatArray evalFreqs,
+        jfloatArray outDb) {
+    if (freqs == nullptr || gains == nullptr || qs == nullptr || evalFreqs == nullptr || outDb == nullptr) return;
+    const jsize bLen = std::min(kDspBands, static_cast<int>(std::min(
+            env->GetArrayLength(freqs), std::min(env->GetArrayLength(gains), env->GetArrayLength(qs)))));
+    const jsize evalLen = std::min(env->GetArrayLength(evalFreqs), env->GetArrayLength(outDb));
+    if (evalLen <= 0) return;
+
+    jfloat* fPtr = env->GetFloatArrayElements(freqs, nullptr);
+    jfloat* gPtr = env->GetFloatArrayElements(gains, nullptr);
+    jfloat* qPtr = env->GetFloatArrayElements(qs, nullptr);
+    jfloat* ePtr = env->GetFloatArrayElements(evalFreqs, nullptr);
+    jfloat* oPtr = env->GetFloatArrayElements(outDb, nullptr);
+
+    const double sr = static_cast<double>(std::max(8000, static_cast<int>(sampleRate)));
+    Biquad64 bands[kDspBands];
+    for (int i = 0; i < bLen; ++i) {
+        const int kind = (i == 0) ? 0 : ((i == kDspBands - 1) ? 2 : 1);
+        bands[i].configure(kind, sr, static_cast<double>(fPtr[i]), static_cast<double>(gPtr[i]), static_cast<double>(qPtr[i]));
+    }
+    for (jsize k = 0; k < evalLen; ++k) {
+        double sumDb = 0.0;
+        const double ef = std::clamp(static_cast<double>(ePtr[k]), 18.0, sr * 0.45);
+        for (int i = 0; i < bLen; ++i) {
+            sumDb += bands[i].responseDb(ef, sr);
+        }
+        oPtr[k] = std::isfinite(sumDb) ? static_cast<float>(std::clamp(sumDb, -18.0, 18.0)) : 0.0f;
+    }
+
+    env->ReleaseFloatArrayElements(freqs, fPtr, JNI_ABORT);
+    env->ReleaseFloatArrayElements(gains, gPtr, JNI_ABORT);
+    env->ReleaseFloatArrayElements(qs, qPtr, JNI_ABORT);
+    env->ReleaseFloatArrayElements(evalFreqs, ePtr, JNI_ABORT);
+    env->ReleaseFloatArrayElements(outDb, oPtr, 0);
 }
 
 } // extern "C"

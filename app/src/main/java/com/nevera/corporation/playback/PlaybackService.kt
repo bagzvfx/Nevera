@@ -15,6 +15,7 @@ import android.util.LruCache
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.Player
 import androidx.media3.common.util.BitmapLoader
 import androidx.media3.common.util.UnstableApi
@@ -27,8 +28,10 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -65,6 +68,14 @@ class PlaybackService : MediaLibraryService() {
         @Volatile
         private var sharedCache: SimpleCache? = null
 
+        private val sharedHttpClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(25, TimeUnit.SECONDS)
+                .followRedirects(true)
+                .build()
+        }
+
         fun getCache(context: Context): SimpleCache {
             return sharedCache ?: synchronized(this) {
                 sharedCache ?: run {
@@ -76,6 +87,16 @@ class PlaybackService : MediaLibraryService() {
                     }
                 }
             }
+        }
+
+        fun createCacheDataSourceFactory(context: Context): CacheDataSource.Factory {
+            val httpFactory = OkHttpDataSource.Factory(sharedHttpClient)
+                .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+            val upstreamFactory: DataSource.Factory = DefaultDataSource.Factory(context.applicationContext, httpFactory)
+            return CacheDataSource.Factory()
+                .setCache(getCache(context.applicationContext))
+                .setUpstreamDataSourceFactory(upstreamFactory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         }
 
         fun getCacheSizeMb(context: Context): Long {
@@ -101,6 +122,9 @@ class PlaybackService : MediaLibraryService() {
         super.onCreate()
 
         ensureMediaNotificationChannel()
+        AudiophileDspAudioProcessor.updateLiveProfile(LibraryStore.settings.value.dspProfile)
+        AudioHardwareRouter.start(this)
+        MusicHapticsEngine.init(this)
 
         val notifProvider = DefaultMediaNotificationProvider.Builder(this)
             .setChannelId(PLAYBACK_CHANNEL_ID)
@@ -112,21 +136,8 @@ class PlaybackService : MediaLibraryService() {
             }
         setMediaNotificationProvider(notifProvider)
 
-        val okHttpClient = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .build()
-
-        val httpFactory = OkHttpDataSource.Factory(okHttpClient)
-            .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
-
-        val upstreamFactory: DataSource.Factory = DefaultDataSource.Factory(this, httpFactory)
-
-        val cacheDataSourceFactory = CacheDataSource.Factory()
-            .setCache(getCache(this))
-            .setUpstreamDataSourceFactory(upstreamFactory)
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        val okHttpClient = sharedHttpClient
+        val cacheDataSourceFactory = createCacheDataSourceFactory(this)
 
         val resolvingFactory = ResolvingDataSource.Factory(
             cacheDataSourceFactory,
@@ -169,9 +180,14 @@ class PlaybackService : MediaLibraryService() {
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
                 return DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(enableFloatOutput)
-                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams || enableFloatOutput)
-                    .setAudioProcessors(arrayOf(SpectrumTapAudioProcessor()))
+                    .setEnableFloatOutput(true)
+                    .setEnableAudioTrackPlaybackParams(true)
+                    .setAudioProcessors(
+                        arrayOf(
+                            AudiophileDspAudioProcessor(),
+                            SpectrumTapAudioProcessor()
+                        )
+                    )
                     .build()
             }
         }
@@ -182,6 +198,31 @@ class PlaybackService : MediaLibraryService() {
             .setHandleAudioBecomingNoisy(true)
             .build().apply {
                 skipSilenceEnabled = LibraryStore.settings.value.skipSilence
+                addAnalyticsListener(object : AnalyticsListener {
+                    override fun onAudioInputFormatChanged(
+                        eventTime: AnalyticsListener.EventTime,
+                        format: Format,
+                        decoderReuseEvaluation: DecoderReuseEvaluation?
+                    ) {
+                        val bitDepth = when (format.pcmEncoding) {
+                            C.ENCODING_PCM_8BIT -> 8
+                            C.ENCODING_PCM_16BIT -> 16
+                            C.ENCODING_PCM_24BIT, C.ENCODING_PCM_24BIT_BIG_ENDIAN -> 24
+                            C.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT_BIG_ENDIAN, C.ENCODING_PCM_FLOAT -> 32
+                            else -> 0
+                        }
+                        AudioSignalPathBus.onDecoderFormatChanged(
+                            mimeType = format.sampleMimeType,
+                            sampleRateHz = format.sampleRate,
+                            channelCount = format.channelCount,
+                            bitrateBps = format.bitrate,
+                            bitDepth = bitDepth
+                        )
+                        if (format.sampleRate > 0) {
+                            AudioHardwareRouter.onTrackSampleRateChanged(format.sampleRate)
+                        }
+                    }
+                })
             }
 
         player = exoPlayer
@@ -258,6 +299,9 @@ class PlaybackService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
+        StreamPrefetchManager.cancel()
+        AudioHardwareRouter.stop()
+        MusicHapticsEngine.setPlaying(false)
         mediaLibrarySession?.run {
             player.release()
             release()

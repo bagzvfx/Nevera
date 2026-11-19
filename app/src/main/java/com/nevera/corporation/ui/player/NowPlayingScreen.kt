@@ -39,21 +39,26 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import com.nevera.corporation.data.lyrics.LyricsRepository
 import com.nevera.corporation.data.lyrics.LyricsResult
+import com.nevera.corporation.data.model.AudiophileDspProfile
+import com.nevera.corporation.data.model.LyricLine
 import com.nevera.corporation.data.model.PlayerVisualMode
 import com.nevera.corporation.data.model.Song
 import com.nevera.corporation.data.model.SourceKind
 import com.nevera.corporation.data.model.VisualizerStyle
-import com.nevera.corporation.data.sources.SourceResolver
 import com.nevera.corporation.data.store.LibraryStore
 import com.nevera.corporation.download.OfflineDownloadManager
+import com.nevera.corporation.playback.AudioSignalPathBus
 import com.nevera.corporation.playback.SpectrumAudioBus
 import com.nevera.corporation.playback.SyncedAudioSample
 import com.nevera.corporation.ui.components.PlayingBars
 import com.nevera.corporation.ui.components.thumbnailBorder
+import com.nevera.corporation.ui.i18n.LocalStrings
 import com.nevera.corporation.ui.theme.NeveraArtworkColors
 import com.nevera.corporation.ui.theme.NeveraTextSecondary
 import com.nevera.corporation.ui.vfx.HarmonicLikeButton
@@ -81,7 +86,10 @@ fun NowPlayingScreen(
     repeatMode: Int,
     shuffleEnabled: Boolean,
     playbackSpeed: Float,
+    playbackPitch: Float,
+    tuning432Hz: Boolean,
     sleepTimerRemainingMs: Long?,
+    sleepTimerEndOfTrack: Boolean,
     eqPresets: List<String>,
     selectedEqPreset: Int,
     isLiked: Boolean,
@@ -93,13 +101,20 @@ fun NowPlayingScreen(
     onCycleRepeat: () -> Unit,
     onToggleShuffle: () -> Unit,
     onSetSpeed: (Float) -> Unit,
-    onSetSleepTimer: (Int?) -> Unit,
+    onSetPitch: (Float) -> Unit,
+    onSetTuning432Hz: (Boolean) -> Unit,
+    onSetSleepTimer: (Int?, Boolean) -> Unit,
     onSelectEqPreset: (Int) -> Unit,
+    onUpdateDspProfile: (AudiophileDspProfile) -> Unit,
     onJumpQueueIndex: (Int) -> Unit,
     onRemoveQueueIndex: (Int) -> Unit,
+    onMoveQueueItem: (Int, Int) -> Unit,
+    onSaveQueueAsPlaylist: (String) -> Unit,
     onCollapse: () -> Unit
 ) {
-    val streamInfo by SourceResolver.lastResolvedStreamInfo.collectAsState()
+    val strings = LocalStrings.current
+    val context = LocalContext.current
+    val signalPath by AudioSignalPathBus.state.collectAsState()
     val settings by LibraryStore.settings.collectAsState()
     val downloadProgressMap by OfflineDownloadManager.downloadProgress.collectAsState()
     val downloadedList by OfflineDownloadManager.downloadedSongs.collectAsState()
@@ -114,6 +129,8 @@ fun NowPlayingScreen(
     var showTimerSheet by remember { mutableStateOf(false) }
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showEqDialog by remember { mutableStateOf(false) }
+    var showSignalPathSheet by remember { mutableStateOf(false) }
+    var shareCardLines by remember { mutableStateOf<List<LyricLine>?>(null) }
     val dragOffsetY = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
 
@@ -241,17 +258,36 @@ fun NowPlayingScreen(
                 }
 
                 if (settings.showAudioStats) {
+                    val dotColor = when {
+                        signalPath.usbBitPerfectExclusive || signalPath.bitPerfectBypass -> Color(0xFF34D399)
+                        signalPath.isLossless -> Color(0xFFFBBF24)
+                        else -> artworkColors.primary
+                    }
                     Surface(
                         shape = RoundedCornerShape(16.dp),
-                        color = Color.White.copy(alpha = 0.10f)
+                        color = Color.White.copy(alpha = 0.10f),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { showSignalPathSheet = true }
                     ) {
-                        Text(
-                            text = streamInfo,
-                            color = Color.White.copy(alpha = 0.85f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(dotColor)
+                            )
+                            Text(
+                                text = signalPath.compactBadge,
+                                color = Color.White.copy(alpha = 0.90f),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 } else {
                     Spacer(modifier = Modifier.width(1.dp))
@@ -296,7 +332,8 @@ fun NowPlayingScreen(
                             isLoading = isLoadingLyrics,
                             playheadState = playheadState,
                             accentColor = artworkColors.primary,
-                            onSeekToMs = onSeekTo
+                            onSeekToMs = onSeekTo,
+                            onOpenShareCard = { linesToShare -> shareCardLines = linesToShare }
                         )
                     } else {
                         Box(
@@ -575,30 +612,47 @@ fun NowPlayingScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Bottom Minimal Tool Strip: Equalizer, Speed, Sleep Timer, Queue
+            // Bottom Minimal Tool Strip: Studio DSP, Speed & Pitch, Sleep Timer, Queue
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { showEqDialog = true }) {
+                    val dspHighlight = settings.dspProfile.bitPerfectBypass ||
+                        settings.dspProfile.isActivelyProcessing() ||
+                        selectedEqPreset > 0
                     Icon(
                         Icons.Rounded.Tune,
-                        "Equalizer",
-                        tint = if (selectedEqPreset > 0) artworkColors.primary else Color.White.copy(alpha = 0.65f),
+                        strings.studioDspTitle,
+                        tint = when {
+                            settings.dspProfile.bitPerfectBypass -> Color(0xFF34D399)
+                            dspHighlight -> artworkColors.primary
+                            else -> Color.White.copy(alpha = 0.65f)
+                        },
                         modifier = Modifier.size(20.dp)
                     )
                 }
 
                 TextButton(onClick = { showSpeedDialog = true }) {
-                    Text("${playbackSpeed}x", color = Color.White.copy(alpha = 0.78f), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    val speedBadge = when {
+                        tuning432Hz -> "432Hz"
+                        playbackPitch != 1.0f -> String.format(java.util.Locale.US, "%.2fx", playbackSpeed)
+                        else -> "${playbackSpeed}x"
+                    }
+                    Text(
+                        text = speedBadge,
+                        color = if (tuning432Hz || playbackSpeed != 1.0f || playbackPitch != 1.0f) artworkColors.primary else Color.White.copy(alpha = 0.78f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
 
                 IconButton(onClick = { showTimerSheet = true }) {
                     Icon(
                         Icons.Rounded.Bedtime,
-                        "Sleep Timer",
-                        tint = if (sleepTimerRemainingMs != null) artworkColors.primary else Color.White.copy(alpha = 0.65f),
+                        strings.sleepTimerTitle,
+                        tint = if (sleepTimerRemainingMs != null || sleepTimerEndOfTrack) artworkColors.primary else Color.White.copy(alpha = 0.65f),
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -606,7 +660,7 @@ fun NowPlayingScreen(
                 IconButton(onClick = { showQueueSheet = true }) {
                     Icon(
                         Icons.Rounded.QueueMusic,
-                        "Antrean",
+                        strings.queueTitle,
                         tint = Color.White.copy(alpha = 0.65f),
                         modifier = Modifier.size(22.dp)
                     )
@@ -615,23 +669,43 @@ fun NowPlayingScreen(
         }
     }
 
-    // Queue Sheet
+    // Queue Sheet (with Reorder Up/Down + Save Queue as Playlist)
     if (showQueueSheet) {
         ModalBottomSheet(
             onDismissRequest = { showQueueSheet = false },
             containerColor = Color(0xFF141418)
         ) {
-            Text(
-                text = "Antrean (${queue.size} lagu)",
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontSize = 17.sp,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${strings.queueTitle} (${queue.size})",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp
+                )
+                if (queue.isNotEmpty()) {
+                    TextButton(
+                        onClick = {
+                            val plName = "Queue • ${song.title.take(18)}"
+                            onSaveQueueAsPlaylist(plName)
+                            Toast.makeText(context, "${strings.save}: $plName", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Icon(Icons.Rounded.PlaylistAdd, null, tint = artworkColors.primary, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(strings.save, color = artworkColors.primary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 420.dp),
+                    .heightIn(max = 440.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
                 itemsIndexed(queue) { idx, item ->
@@ -640,7 +714,7 @@ fun NowPlayingScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onJumpQueueIndex(idx) }
-                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
@@ -672,9 +746,28 @@ fun NowPlayingScreen(
                             )
                             Text(item.artist, color = NeveraTextSecondary, fontSize = 12.sp, maxLines = 1)
                         }
+                        if (idx > 0) {
+                            IconButton(
+                                onClick = { onMoveQueueItem(idx, idx - 1) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Rounded.KeyboardArrowUp, "Move up", tint = NeveraTextSecondary, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        if (idx < queue.lastIndex) {
+                            IconButton(
+                                onClick = { onMoveQueueItem(idx, idx + 1) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Rounded.KeyboardArrowDown, "Move down", tint = NeveraTextSecondary, modifier = Modifier.size(18.dp))
+                            }
+                        }
                         if (!isCurr) {
-                            IconButton(onClick = { onRemoveQueueIndex(idx) }) {
-                                Icon(Icons.Rounded.Close, "Hapus", tint = NeveraTextSecondary)
+                            IconButton(
+                                onClick = { onRemoveQueueIndex(idx) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Rounded.Close, "Remove", tint = NeveraTextSecondary, modifier = Modifier.size(18.dp))
                             }
                         }
                     }
@@ -683,37 +776,49 @@ fun NowPlayingScreen(
         }
     }
 
-    // Sleep Timer Sheet
+    // Sleep Timer Sheet (with End of Current Track + Smooth Fade-Out)
     if (showTimerSheet) {
         ModalBottomSheet(
             onDismissRequest = { showTimerSheet = false },
             containerColor = Color(0xFF141418)
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
-                Text("Sleep Timer", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(strings.sleepTimerTitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text("Includes smooth 10-second volume fade-out", color = NeveraTextSecondary, fontSize = 12.sp)
                 Spacer(modifier = Modifier.height(10.dp))
+                ListItem(
+                    headlineContent = { Text(strings.endOfTrackLabel, color = if (sleepTimerEndOfTrack) artworkColors.primary else Color.White) },
+                    leadingContent = { Icon(Icons.Rounded.MusicNote, null, tint = if (sleepTimerEndOfTrack) artworkColors.primary else Color.White) },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable {
+                            onSetSleepTimer(null, true)
+                            showTimerSheet = false
+                        }
+                )
                 listOf(10, 20, 30, 45, 60).forEach { mins ->
                     ListItem(
-                        headlineContent = { Text("$mins Menit", color = Color.White) },
+                        headlineContent = { Text("$mins min", color = Color.White) },
                         leadingContent = { Icon(Icons.Rounded.Timer, null, tint = Color.White) },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
                             .clickable {
-                                onSetSleepTimer(mins)
+                                onSetSleepTimer(mins, false)
                                 showTimerSheet = false
                             }
                     )
                 }
-                if (sleepTimerRemainingMs != null) {
+                if (sleepTimerRemainingMs != null || sleepTimerEndOfTrack) {
                     ListItem(
-                        headlineContent = { Text("Matikan Timer", color = Color(0xFFFA2D48)) },
+                        headlineContent = { Text("Turn Off Timer", color = Color(0xFFFA2D48)) },
                         leadingContent = { Icon(Icons.Rounded.Cancel, null, tint = Color(0xFFFA2D48)) },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
                             .clickable {
-                                onSetSleepTimer(null)
+                                onSetSleepTimer(null, false)
                                 showTimerSheet = false
                             }
                     )
@@ -723,59 +828,120 @@ fun NowPlayingScreen(
         }
     }
 
-    // Speed Dialog
+    // Speed & Pitch Studio Dialog (with 432 Hz Tuning, Slowed+Warm & Nightcore)
     if (showSpeedDialog) {
         AlertDialog(
             onDismissRequest = { showSpeedDialog = false },
-            containerColor = Color(0xFF16161A),
-            title = { Text("Kecepatan Putar", color = Color.White, fontWeight = FontWeight.Bold) },
+            containerColor = Color(0xFF16161C),
+            title = { Text("Speed & Pitch Studio", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { sp ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { onSetSpeed(sp); showSpeedDialog = false }
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("${sp}x", color = Color.White, fontWeight = FontWeight.Medium)
-                            if (playbackSpeed == sp) Icon(Icons.Rounded.Check, null, tint = Color.White)
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Quick Mood Presets
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        listOf(
+                            Triple("Normal", 1.0f, 1.0f),
+                            Triple("Slowed", 0.85f, 0.88f),
+                            Triple("Nightcore", 1.22f, 1.18f)
+                        ).forEach { (lbl, spd, ptc) ->
+                            val isAct = kotlin.math.abs(playbackSpeed - spd) < 0.03f && kotlin.math.abs(playbackPitch - ptc) < 0.03f && !tuning432Hz
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isAct) artworkColors.primary else Color(0xFF23232C),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        onSetTuning432Hz(false)
+                                        onSetSpeed(spd)
+                                        onSetPitch(ptc)
+                                    }
+                            ) {
+                                Text(
+                                    text = lbl,
+                                    color = if (isAct) Color.Black else Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+                                    maxLines = 1
+                                )
+                            }
                         }
+                    }
+
+                    // Speed Slider
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Tempo / Speed", color = Color.White, fontSize = 13.sp)
+                        Text(String.format(java.util.Locale.US, "%.2fx", playbackSpeed), color = artworkColors.primary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = playbackSpeed,
+                        onValueChange = { onSetSpeed((it * 20f).toInt() / 20f) },
+                        valueRange = 0.5f..2.0f,
+                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = artworkColors.primary)
+                    )
+
+                    // Pitch Slider
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Pitch Shift", color = Color.White, fontSize = 13.sp)
+                        Text(String.format(java.util.Locale.US, "%.2fx", playbackPitch), color = artworkColors.primary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = playbackPitch,
+                        onValueChange = { onSetPitch((it * 20f).toInt() / 20f) },
+                        valueRange = 0.7f..1.3f,
+                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = artworkColors.primary)
+                    )
+
+                    // 432 Hz Audiophile Tuning Switch
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF1F1F28))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("432 Hz Audiophile Tuning", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Subtle pitch shift from A=440Hz to A=432Hz", color = NeveraTextSecondary, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = tuning432Hz,
+                            onCheckedChange = onSetTuning432Hz,
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = artworkColors.primary)
+                        )
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text("Tutup") } }
+            confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text(strings.close, color = Color.White) } }
         )
     }
 
-    // Built-in Equalizer Preset Dialog
+    // Nevera Studio Audiophile DSP Sheet
     if (showEqDialog) {
-        AlertDialog(
-            onDismissRequest = { showEqDialog = false },
-            containerColor = Color(0xFF16161A),
-            title = { Text("Equalizer Audio", color = Color.White, fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    eqPresets.forEachIndexed { idx, name ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { onSelectEqPreset(idx); showEqDialog = false }
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(name, color = Color.White, fontWeight = FontWeight.Medium)
-                            if (selectedEqPreset == idx) Icon(Icons.Rounded.Check, null, tint = Color.White)
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showEqDialog = false }) { Text("Tutup") } }
+        AudiophileStudioSheet(
+            accentColor = artworkColors.primary,
+            onUpdateProfile = onUpdateDspProfile,
+            onDismiss = { showEqDialog = false }
+        )
+    }
+
+    // Live Audio Signal Path Inspector Sheet
+    if (showSignalPathSheet) {
+        AudioSignalPathSheet(
+            accentColor = artworkColors.primary,
+            onOpenStudioDsp = { showEqDialog = true },
+            onDismiss = { showSignalPathSheet = false }
+        )
+    }
+
+    // OLED Lyric Share Card Sheet
+    shareCardLines?.let { linesForCard ->
+        LyricShareCardSheet(
+            song = song,
+            lines = linesForCard,
+            accentColor = artworkColors.primary,
+            secondaryColor = artworkColors.secondary,
+            onDismiss = { shareCardLines = null }
         )
     }
 }

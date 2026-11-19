@@ -1,11 +1,17 @@
 package com.nevera.corporation
 
+import com.nevera.corporation.data.audio.AutoEqCatalog
 import com.nevera.corporation.data.lyrics.LyricsRepository
 import com.nevera.corporation.data.lyrics.NeveraLyricAiEngine
 import com.nevera.corporation.data.lyrics.ParallelLyricSources
 import com.nevera.corporation.data.model.AppLanguage
 import com.nevera.corporation.data.model.AppSettingsState
+import com.nevera.corporation.data.model.AudiophileDspProfile
+import com.nevera.corporation.data.model.CrossfeedMode
+import com.nevera.corporation.data.model.EqBandSpec
 import com.nevera.corporation.data.model.LyricLine
+import com.nevera.corporation.data.model.NetworkServerConfig
+import com.nevera.corporation.data.model.NetworkServerType
 import com.nevera.corporation.data.model.Song
 import com.nevera.corporation.data.model.SourceKind
 import com.nevera.corporation.data.model.VisualizerStyle
@@ -13,6 +19,7 @@ import com.nevera.corporation.data.native.NeveraNativeEngine
 import com.nevera.corporation.data.sources.AccountSyncManager
 import com.nevera.corporation.data.sources.InnertubeClient
 import com.nevera.corporation.data.sources.JioSaavnService
+import com.nevera.corporation.data.sources.NetworkStorageClient
 import com.nevera.corporation.data.sources.PlaylistImportEngine
 import com.nevera.corporation.data.sources.RecommendationEngine
 import com.nevera.corporation.data.sources.TrackMatcher
@@ -407,5 +414,174 @@ class NeveraCoreTests {
         val cue = computeInstrumentalDotsState(posMs = 4600L, startMs = 1000L, endMs = 5000L)
         assertTrue("Expected vocal entry anticipation > 0.4f near end, got ${cue.entryAnticipation}", cue.entryAnticipation > 0.4f)
         assertTrue(cue.dotProgress[2] > 0.5f)
+    }
+
+    @Test
+    fun testStudioDspBiquadCurveAndTruePeakLimiter() {
+        val evalFreqs = floatArrayOf(31f, 62f, 250f, 1000f, 8000f, 16000f)
+        val flatProfile = AudiophileDspProfile()
+        val flatCurve = NeveraNativeEngine.computeEqCurveDb(flatProfile, evalFreqs, 48000)
+        for (db in flatCurve) {
+            assertEquals("Flat profile must stay at 0 dB", 0f, db, 0.05f)
+        }
+
+        val bassBands = AudiophileDspProfile.DEFAULT_TEN_BANDS.map { b ->
+            if (b.frequencyHz == 62f) b.copy(gainDb = 6.0f) else b
+        }
+        val bassProfile = flatProfile.copy(bands = bassBands, autoPreamp = false, lufsNormalization = false)
+        val bassCurve = NeveraNativeEngine.computeEqCurveDb(bassProfile, evalFreqs, 48000)
+        assertTrue("62 Hz band should boost > 5 dB, got ${bassCurve[1]}", bassCurve[1] > 5.0f)
+        assertTrue("8 kHz band should remain near 0 dB, got ${bassCurve[4]}", kotlin.math.abs(bassCurve[4]) < 0.35f)
+
+        // True-Peak Limiter safety test under extreme hot signal
+        val handle = NeveraNativeEngine.dspCreate(48000, 2)
+        try {
+            NeveraNativeEngine.dspUpdateProfile(handle, bassProfile.copy(preampDb = 6.0f))
+            val frames = 1024
+            val hotStereo = FloatArray(frames * 2) { i ->
+                val t = (i / 2).toDouble() / 48000.0
+                (2.4 * sin(2.0 * PI * 62.0 * t)).toFloat()
+            }
+            NeveraNativeEngine.dspProcessFloatInterleaved(handle, hotStereo, frames)
+            for (s in hotStereo) {
+                assertTrue("DSP output must be finite", s.isFinite())
+                assertTrue("True-Peak limiter must keep sample <= 0.99f, got $s", kotlin.math.abs(s) <= 0.991f)
+            }
+        } finally {
+            NeveraNativeEngine.dspDestroy(handle)
+        }
+    }
+
+    @Test
+    fun testStudioDspBs2bCrossfeedAndBitPerfectBypass() {
+        val handle = NeveraNativeEngine.dspCreate(48000, 2)
+        try {
+            val frames = 256
+            // 1. Bit-Perfect Direct Bypass: right channel stays bit-for-bit 0.0f
+            val bypassProfile = AudiophileDspProfile(
+                enabled = true,
+                bitPerfectBypass = true,
+                crossfeedMode = CrossfeedMode.CHU_MOY
+            )
+            NeveraNativeEngine.dspUpdateProfile(handle, bypassProfile)
+            val bypassBuf = FloatArray(frames * 2) { idx -> if (idx % 2 == 0) 0.5f else 0.0f }
+            NeveraNativeEngine.dspProcessFloatInterleaved(handle, bypassBuf, frames)
+            for (f in 0 until frames) {
+                assertEquals(0.5f, bypassBuf[f * 2], 0.0f)
+                assertEquals(0.0f, bypassBuf[f * 2 + 1], 0.0f)
+            }
+
+            // 2. BS2B Crossfeed active: hard-left low signal bleeds cleanly into right channel
+            NeveraNativeEngine.dspReset(handle)
+            val cfProfile = AudiophileDspProfile(
+                enabled = true,
+                bitPerfectBypass = false,
+                crossfeedMode = CrossfeedMode.STUDIO_DEFAULT,
+                lufsNormalization = false
+            )
+            NeveraNativeEngine.dspUpdateProfile(handle, cfProfile)
+            val cfBuf = FloatArray(frames * 2) { idx -> if (idx % 2 == 0) 0.45f else 0.0f }
+            NeveraNativeEngine.dspProcessFloatInterleaved(handle, cfBuf, frames)
+            val rightBleed = cfBuf[(frames - 1) * 2 + 1]
+            assertTrue("Expected BS2B crossfeed bleed into right channel (> 0.05f), got $rightBleed", rightBleed > 0.05f)
+        } finally {
+            NeveraNativeEngine.dspDestroy(handle)
+        }
+    }
+
+    @Test
+    fun testAutoEqTextParser() {
+        val sampleAutoEq = """
+            Preamp: -4.6 dB
+            Filter 1: ON PK Fc 32 Hz Gain 3.8 dB Q 1.2
+            Filter 2: ON PK Fc 125 Hz Gain -1.5 dB Q 1.4
+            Filter 3: ON PK Fc 2400 Hz Gain 2.9 dB Q 2.1
+            Filter 4: ON HS Fc 10000 Hz Gain 1.8 dB Q 0.71
+        """.trimIndent()
+        val parsed = AutoEqCatalog.parseAutoEqText(sampleAutoEq, "Moondrop Blessing 3")
+        assertNotNull(parsed)
+        assertEquals("Moondrop Blessing 3", parsed!!.name)
+        assertEquals(-4.6f, parsed.preampDb, 0.01f)
+        assertEquals(4, parsed.parsedFilterCount)
+        assertEquals(10, parsed.bands.size)
+        assertTrue(parsed.bands.any { kotlin.math.abs(it.frequencyHz - 2400f) < 1f && kotlin.math.abs(it.gainDb - 2.9f) < 0.05f })
+    }
+
+    @Test
+    fun testMasterStudioTrackMatcherPrefersStudioAndLossless() {
+        val mvCandidate = Song(
+            id = "mv",
+            title = "Night Dancer (Official Music Video)",
+            artist = "imase",
+            durationSeconds = 211,
+            source = SourceKind.YOUTUBE
+        )
+        val slowedCandidate = Song(
+            id = "slow",
+            title = "Night Dancer (Slowed + Reverb)",
+            artist = "imase",
+            durationSeconds = 212,
+            source = SourceKind.YOUTUBE
+        )
+        val studioCandidate = Song(
+            id = "studio",
+            title = "Night Dancer (Official Audio)",
+            artist = "imase",
+            durationSeconds = 211,
+            source = SourceKind.YOUTUBE
+        )
+        val picked = TrackMatcher.pickBestMatch(
+            targetTitle = "Night Dancer",
+            targetArtist = "imase",
+            targetDurationSec = 211,
+            candidates = listOf(slowedCandidate, mvCandidate, studioCandidate)
+        )
+        assertEquals("studio", picked?.id)
+    }
+
+    @Test
+    fun testSubsonicAuthAndWebDavXmlParsing() {
+        val auth = NetworkStorageClient.buildSubsonicAuthQuery("audiophile", "secret123", salt = "abc123")
+        assertTrue(auth.contains("u=audiophile"))
+        assertTrue(auth.contains("s=abc123"))
+        assertTrue(auth.contains("t=${NetworkStorageClient.md5Hex("secret123abc123")}"))
+        assertTrue(auth.contains("c=Nevera"))
+
+        val xml = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response>
+                <d:href>/dav/Music/</d:href>
+                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat>
+              </d:response>
+              <d:response>
+                <d:href>/dav/Music/Albums/</d:href>
+                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat>
+              </d:response>
+              <d:response>
+                <d:href>/dav/Music/Daft%20Punk%20-%20Instant%20Crush.flac</d:href>
+                <d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat>
+              </d:response>
+              <d:response>
+                <d:href>/dav/Music/cover.jpg</d:href>
+                <d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat>
+              </d:response>
+            </d:multistatus>
+        """.trimIndent()
+        val cfg = NetworkServerConfig(
+            id = "nas1",
+            name = "Home NAS",
+            type = NetworkServerType.WEBDAV,
+            baseUrl = "https://nas.local/dav/Music"
+        )
+        val entries = NetworkStorageClient.parseWebDavXml(xml, "https://nas.local/dav/Music/", cfg)
+        assertEquals(2, entries.size)
+        assertTrue(entries[0].isDirectory)
+        assertEquals("Albums", entries[0].name)
+        assertFalse(entries[1].isDirectory)
+        assertEquals("Instant Crush", entries[1].song?.title)
+        assertEquals("Daft Punk", entries[1].song?.artist)
+        assertEquals("FLAC", entries[1].song?.codecHint)
+        assertTrue(entries[1].song?.isLosslessHint == true)
     }
 }

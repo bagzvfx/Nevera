@@ -17,6 +17,13 @@ object TrackMatcher {
     private val nonAlphaNum = Regex("""[^\p{L}\p{N}\s]""")
     private val multiSpace = Regex("""\s+""")
 
+    private val degradedVideoKeywords = listOf(
+        "official music video", "music video", "official video", "mv", "m/v",
+        "live", "concert", "cover", "karaoke", "instrumental",
+        "slowed", "reverb", "nightcore", "sped up", "8d", "bass boosted", "remix"
+    )
+    private val masterAudioKeywords = listOf("official audio", "topic", "remastered", "studio")
+
     fun normalizeTitle(raw: String): String {
         var s = raw.trim()
         s = noisePattern.replace(s, "")
@@ -73,7 +80,31 @@ object TrackMatcher {
             }
         } else 0.7
 
-        return (titleScore * 0.50) + (artistScore * 0.35) + (durationScore * 0.15)
+        // Master Studio Quality Bias: prefer clean studio/lossless masters over degraded MV/cover/reupload variants
+        val targetLower = targetTitle.lowercase()
+        val candLower = "${candidate.title} ${candidate.artist}".lowercase()
+        var qualityModifier = 0.0
+        if (candidate.isLosslessHint) {
+            qualityModifier += 0.14
+        }
+        for (kw in degradedVideoKeywords) {
+            val wordBound = Regex("""\b${Regex.escape(kw)}\b""")
+            if (wordBound.containsMatchIn(candLower) && !wordBound.containsMatchIn(targetLower)) {
+                qualityModifier -= if (kw in setOf("cover", "karaoke", "slowed", "nightcore", "8d", "remix", "live")) {
+                    0.22
+                } else {
+                    0.09
+                }
+            }
+        }
+        for (kw in masterAudioKeywords) {
+            if (candLower.contains(kw)) {
+                qualityModifier += 0.04
+            }
+        }
+
+        return ((titleScore * 0.50) + (artistScore * 0.35) + (durationScore * 0.15) + qualityModifier)
+            .coerceIn(0.0, 1.15)
     }
 
     fun pickBestMatch(

@@ -7,10 +7,13 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import com.nevera.corporation.data.audio.AutoEqCatalog
+import com.nevera.corporation.data.model.AudiophileDspProfile
 import com.nevera.corporation.data.model.Song
 import com.nevera.corporation.data.model.SourceKind
 import com.nevera.corporation.data.sources.InnertubeClient
@@ -72,14 +75,23 @@ class PlayerConnection(private val context: Context) {
     private val _playbackSpeed = MutableStateFlow(1.0f)
     val playbackSpeed: StateFlow<Float> = _playbackSpeed.asStateFlow()
 
+    private val _playbackPitch = MutableStateFlow(LibraryStore.settings.value.playbackPitch)
+    val playbackPitch: StateFlow<Float> = _playbackPitch.asStateFlow()
+
+    private val _tuning432Hz = MutableStateFlow(LibraryStore.settings.value.tuning432Hz)
+    val tuning432Hz: StateFlow<Boolean> = _tuning432Hz.asStateFlow()
+
     private val _sleepTimerRemainingMs = MutableStateFlow<Long?>(null)
     val sleepTimerRemainingMs: StateFlow<Long?> = _sleepTimerRemainingMs.asStateFlow()
+
+    private val _sleepTimerEndOfTrack = MutableStateFlow(false)
+    val sleepTimerEndOfTrack: StateFlow<Boolean> = _sleepTimerEndOfTrack.asStateFlow()
 
     private val _selectedEqPreset = MutableStateFlow(0)
     val selectedEqPreset: StateFlow<Int> = _selectedEqPreset.asStateFlow()
 
     private val _eqPresets = MutableStateFlow<List<String>>(
-        listOf("Normal", "Pop", "Rock", "Bass Boost", "Jazz", "Classic", "Vocal Boost")
+        AutoEqCatalog.presets.map { it.name }
     )
     val eqPresets: StateFlow<List<String>> = _eqPresets.asStateFlow()
 
@@ -116,12 +128,15 @@ class PlayerConnection(private val context: Context) {
         _isPlaying.value = ctrl.isPlaying
         _repeatMode.value = ctrl.repeatMode
         _shuffleEnabled.value = ctrl.shuffleModeEnabled
-        audioFxBridge.attachSession(0)
-        audioFxBridge.applyLoudness(LibraryStore.settings.value.loudnessNormalization)
+        // Nevera v2.0 uses C++17 64-bit Studio DSP in PlaybackService; keep legacy Android FX detached to prevent double EQ.
+        audioFxBridge.release()
+        AudiophileDspAudioProcessor.updateLiveProfile(LibraryStore.settings.value.dspProfile)
+        applyPlaybackParams(ctrl)
 
         ctrl.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 _isPlaying.value = playing
+                MusicHapticsEngine.setPlaying(playing)
                 val pos = ctrl.currentPosition.coerceAtLeast(0L)
                 _playhead.value = PlaybackPlayhead(
                     positionMs = pos,
@@ -149,6 +164,11 @@ class PlayerConnection(private val context: Context) {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                     _currentSong.value?.let { LibraryStore.recordCompletionBoost(it) }
+                    if (_sleepTimerEndOfTrack.value) {
+                        _sleepTimerEndOfTrack.value = false
+                        _sleepTimerRemainingMs.value = null
+                        ctrl.pause()
+                    }
                 }
                 val idx = ctrl.currentMediaItemIndex
                 _currentIndex.value = idx
@@ -165,6 +185,7 @@ class PlayerConnection(private val context: Context) {
                     LibraryStore.recordPlayed(song)
                     _durationMs.value = ctrl.duration.takeIf { it > 0 } ?: song.durationMs
                     maybeFetchUpNext(song, idx)
+                    StreamPrefetchManager.prefetchUpcoming(context, _queue.value, idx)
                     applyCrossfadeIn(ctrl)
                 }
             }
@@ -250,8 +271,16 @@ class PlayerConnection(private val context: Context) {
     }
 
     fun selectEqualizerPreset(index: Int) {
+        val preset = AutoEqCatalog.presets.getOrNull(index) ?: return
         _selectedEqPreset.value = index
-        audioFxBridge.applyEqualizerPreset(index)
+        val updated = AutoEqCatalog.applyPreset(LibraryStore.settings.value.dspProfile, preset)
+        updateDspProfile(updated)
+    }
+
+    fun updateDspProfile(profile: AudiophileDspProfile) {
+        val idx = AutoEqCatalog.presets.indexOfFirst { it.name.equals(profile.presetName, true) }
+        _selectedEqPreset.value = if (idx >= 0) idx else 0
+        AudioHardwareRouter.onUserProfileEdited(profile)
     }
 
     private fun Song.toMediaItem(): MediaItem {
@@ -317,6 +346,7 @@ class PlayerConnection(private val context: Context) {
             fetchSmartQueueTail(seedSong = song, expectedSeedId = song.id)
         } else {
             maybeFetchUpNext(song, startIndex)
+            StreamPrefetchManager.prefetchUpcoming(context, initialQueue, startIndex)
         }
     }
 
@@ -344,6 +374,7 @@ class PlayerConnection(private val context: Context) {
                 if (deduped.isNotEmpty()) {
                     _queue.value = _queue.value + deduped
                     controller?.addMediaItems(deduped.map { it.toMediaItem() })
+                    StreamPrefetchManager.prefetchUpcoming(context, _queue.value, _currentIndex.value)
                 }
             }
         }
@@ -396,6 +427,37 @@ class PlayerConnection(private val context: Context) {
             _currentIndex.value -= 1
         }
         controller?.removeMediaItem(index)
+        StreamPrefetchManager.prefetchUpcoming(context, _queue.value, _currentIndex.value)
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
+        val list = _queue.value
+        if (fromIndex !in list.indices || toIndex !in list.indices || fromIndex == toIndex) return
+        val mutable = list.toMutableList()
+        val moved = mutable.removeAt(fromIndex)
+        mutable.add(toIndex, moved)
+        _queue.value = mutable
+
+        val cur = _currentIndex.value
+        val newCur = when {
+            cur == fromIndex -> toIndex
+            fromIndex < cur && toIndex >= cur -> cur - 1
+            fromIndex > cur && toIndex <= cur -> cur + 1
+            else -> cur
+        }
+        _currentIndex.value = newCur
+        controller?.moveMediaItem(fromIndex, toIndex)
+        StreamPrefetchManager.prefetchUpcoming(context, _queue.value, newCur)
+    }
+
+    fun saveQueueAsPlaylist(name: String): Boolean {
+        val songs = _queue.value
+        if (songs.isEmpty()) return false
+        LibraryStore.saveImportedPlaylist(
+            name = name.trim().ifBlank { "Nevera Queue" },
+            songs = songs
+        )
+        return true
     }
 
     fun togglePlayPause() {
@@ -459,16 +521,43 @@ class PlayerConnection(private val context: Context) {
         controller?.shuffleModeEnabled = next
     }
 
-    fun setPlaybackSpeed(speed: Float) {
-        val clamped = speed.coerceIn(0.5f, 2.0f)
-        _playbackSpeed.value = clamped
-        controller?.setPlaybackSpeed(clamped)
+    private fun applyPlaybackParams(ctrl: MediaController? = controller) {
+        val speed = _playbackSpeed.value.coerceIn(0.5f, 2.0f)
+        val basePitch = _playbackPitch.value.coerceIn(0.7f, 1.3f)
+        val tuneFactor = if (_tuning432Hz.value) (432f / 440f) else 1.0f
+        val effectivePitch = (basePitch * tuneFactor).coerceIn(0.65f, 1.4f)
+        ctrl?.playbackParameters = PlaybackParameters(speed, effectivePitch)
     }
 
-    fun startSleepTimer(minutes: Int?) {
+    fun setPlaybackSpeed(speed: Float) {
+        _playbackSpeed.value = speed.coerceIn(0.5f, 2.0f)
+        applyPlaybackParams()
+    }
+
+    fun setPlaybackPitch(pitch: Float) {
+        val clamped = pitch.coerceIn(0.7f, 1.3f)
+        _playbackPitch.value = clamped
+        LibraryStore.updateSettings { it.copy(playbackPitch = clamped) }
+        applyPlaybackParams()
+    }
+
+    fun setTuning432Hz(enabled: Boolean) {
+        _tuning432Hz.value = enabled
+        LibraryStore.updateSettings { it.copy(tuning432Hz = enabled) }
+        applyPlaybackParams()
+    }
+
+    fun startSleepTimer(minutes: Int?, endOfTrack: Boolean = false) {
         sleepTimerJob?.cancel()
+        if (endOfTrack) {
+            _sleepTimerEndOfTrack.value = true
+            _sleepTimerRemainingMs.value = -1L
+            return
+        }
+        _sleepTimerEndOfTrack.value = false
         if (minutes == null || minutes <= 0) {
             _sleepTimerRemainingMs.value = null
+            controller?.volume = 1f
             return
         }
         var remaining = minutes * 60_000L
@@ -478,9 +567,14 @@ class PlayerConnection(private val context: Context) {
                 delay(1000L)
                 remaining -= 1000L
                 _sleepTimerRemainingMs.value = remaining
+                // Gentle 10-second linear fade-out before pausing
+                if (remaining in 1..10_000L) {
+                    controller?.volume = (remaining / 10_000f).coerceIn(0.05f, 1f)
+                }
             }
             _sleepTimerRemainingMs.value = null
             controller?.pause()
+            controller?.volume = 1f
         }
     }
 

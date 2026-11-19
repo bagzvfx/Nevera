@@ -23,19 +23,25 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nevera.corporation.BuildConfig
 import com.nevera.corporation.R
 import com.nevera.corporation.data.model.AppLanguage
 import com.nevera.corporation.data.model.AudioQuality
+import com.nevera.corporation.data.model.AudiophileDspProfile
 import com.nevera.corporation.data.model.HarmonicVfxMode
 import com.nevera.corporation.data.model.PlayerVisualMode
 import com.nevera.corporation.data.model.VisualizerStyle
 import com.nevera.corporation.data.sources.AccountSyncManager
 import com.nevera.corporation.data.store.LibraryStore
+import com.nevera.corporation.data.store.NetworkStorageRepository
+import com.nevera.corporation.playback.AudioHardwareRouter
 import com.nevera.corporation.playback.PlaybackService
+import com.nevera.corporation.ui.components.NetworkStorageManagerDialog
 import com.nevera.corporation.ui.components.PlaylistImportDialog
 import com.nevera.corporation.ui.components.YouTubeLoginSyncDialog
 import com.nevera.corporation.ui.components.syncAccountPlaylistsNow
 import com.nevera.corporation.ui.i18n.LocalStrings
+import com.nevera.corporation.ui.player.AudiophileStudioSheet
 import com.nevera.corporation.ui.theme.NeveraBlack
 import com.nevera.corporation.ui.theme.NeveraHairline
 import com.nevera.corporation.ui.theme.NeveraTextSecondary
@@ -52,6 +58,7 @@ import kotlin.math.roundToInt
 @Composable
 fun SettingsScreen(
     accentColor: Color,
+    onUpdateDspProfile: (AudiophileDspProfile) -> Unit = { AudioHardwareRouter.onUserProfileEdited(it) },
     onBack: () -> Unit
 ) {
     val strings = LocalStrings.current
@@ -59,12 +66,15 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     val settings by LibraryStore.settings.collectAsState()
     val isSignedIn by AccountSyncManager.isSignedIn.collectAsState()
+    val networkServers by NetworkStorageRepository.servers.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
     var cacheUsedMb by remember { mutableLongStateOf(PlaybackService.getCacheSizeMb(context)) }
 
     var activeChoiceDialog by remember { mutableStateOf<String?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showLoginSyncDialog by remember { mutableStateOf(false) }
+    var showStudioDspSheet by remember { mutableStateOf(false) }
+    var showNetworkServerDialog by remember { mutableStateOf(false) }
 
     fun matchesSearch(vararg keywords: String): Boolean {
         if (searchQuery.isBlank()) return true
@@ -183,6 +193,58 @@ fun SettingsScreen(
                             title = strings.settingsWifiOnlyDl,
                             checked = settings.wifiOnlyDownloads,
                             onCheckedChange = { c -> LibraryStore.updateSettings { it.copy(wifiOnlyDownloads = c) } }
+                        )
+                    }
+                }
+            }
+
+            // 2.5 Audiophile Studio & Lossless Network Storage
+            if (matchesSearch("audiophile", "dsp", "eq", "dac", "bit", "perfect", "lossless", "server", "subsonic", "webdav", "prefetch", "haptics")) {
+                item(key = "grp_audiophile") {
+                    SettingsGroup(
+                        title = "AUDIOPHILE & LOSSLESS STREAMING",
+                        footer = "64-bit double-precision C++17 DSP, AutoEQ IEM profiles, Bit-Perfect USB-DAC (Android 14+), Smart Queue Prefetch Cache, and personal Subsonic/WebDAV lossless servers."
+                    ) {
+                        SettingsChoiceRow(
+                            icon = Icons.Rounded.GraphicEq,
+                            title = strings.studioDspTitle,
+                            value = if (settings.dspProfile.bitPerfectBypass) "Bit-Perfect" else settings.dspProfile.presetName,
+                            onClick = { showStudioDspSheet = true }
+                        )
+                        SettingsDivider()
+                        SettingsChoiceRow(
+                            icon = Icons.Rounded.Dns,
+                            title = strings.networkStorageTitle,
+                            value = if (networkServers.isEmpty()) "Add" else "${networkServers.size} active",
+                            onClick = { showNetworkServerDialog = true }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            icon = Icons.Rounded.CloudDone,
+                            title = strings.preferLosslessServer,
+                            checked = settings.preferPersonalLosslessServer,
+                            onCheckedChange = { c -> LibraryStore.updateSettings { it.copy(preferPersonalLosslessServer = c) } }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            icon = Icons.Rounded.Bolt,
+                            title = strings.smartPrefetchLabel,
+                            checked = settings.smartQueuePrefetch,
+                            onCheckedChange = { c -> LibraryStore.updateSettings { it.copy(smartQueuePrefetch = c) } }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            icon = Icons.Rounded.Headphones,
+                            title = strings.perDeviceAutoProfile,
+                            checked = settings.autoSwitchDeviceProfile,
+                            onCheckedChange = { c -> LibraryStore.updateSettings { it.copy(autoSwitchDeviceProfile = c) } }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            icon = Icons.Rounded.Vibration,
+                            title = strings.musicHapticsLabel,
+                            checked = settings.musicHapticsEnabled,
+                            onCheckedChange = { c -> LibraryStore.updateSettings { it.copy(musicHapticsEnabled = c) } }
                         )
                     }
                 }
@@ -331,7 +393,7 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     Text("Nevera", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text("v6.0.0 • com.nevera.corporation", color = NeveraTextSecondary, fontSize = 12.sp)
+                    Text("v${BuildConfig.VERSION_NAME} • com.nevera.corporation", color = NeveraTextSecondary, fontSize = 12.sp)
                 }
             }
         }
@@ -456,7 +518,7 @@ fun SettingsScreen(
                         }
 
                         "cache_limit" -> {
-                            listOf(128, 256, 512, 1024).forEach { mb ->
+                            listOf(256, 512, 1024, 2048).forEach { mb ->
                                 ChoiceDialogRow("$mb MB", settings.cacheLimitMb == mb) {
                                     LibraryStore.updateSettings { it.copy(cacheLimitMb = mb) }
                                     activeChoiceDialog = null
@@ -480,6 +542,21 @@ fun SettingsScreen(
         YouTubeLoginSyncDialog(
             onSynced = {},
             onDismiss = { showLoginSyncDialog = false }
+        )
+    }
+
+    if (showStudioDspSheet) {
+        AudiophileStudioSheet(
+            accentColor = accentColor,
+            onUpdateProfile = onUpdateDspProfile,
+            onDismiss = { showStudioDspSheet = false }
+        )
+    }
+
+    if (showNetworkServerDialog) {
+        NetworkStorageManagerDialog(
+            accentColor = accentColor,
+            onDismiss = { showNetworkServerDialog = false }
         )
     }
 }

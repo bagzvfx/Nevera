@@ -93,7 +93,20 @@ data class NeveraStrings(
     val translateLabel: String,
     val originalLabel: String,
     val visualizerLabel: String,
-    val syncOffsetLabel: String
+    val syncOffsetLabel: String,
+    val serversTab: String = "Servers",
+    val recapTab: String = "Recap",
+    val studioDspTitle: String = "Nevera Studio DSP",
+    val signalPathTitle: String = "Audio Signal Path",
+    val networkStorageTitle: String = "Lossless Network Storage",
+    val perDeviceAutoProfile: String = "Per-Device Auto Audio Profile",
+    val smartPrefetchLabel: String = "Smart Queue Prefetch Cache",
+    val musicHapticsLabel: String = "Beat Music Haptics",
+    val preferLosslessServer: String = "Auto-Upgrade to Lossless Server",
+    val dualLineLabel: String = "Dual",
+    val shareLyricCardLabel: String = "Share Lyric Card",
+    val endOfTrackLabel: String = "End of Current Track",
+    val saveQueueLabel: String = "Save Queue as Playlist"
 )
 
 object AppLocalization {
@@ -197,7 +210,20 @@ object AppLocalization {
         translateLabel = "Translate",
         originalLabel = "Original",
         visualizerLabel = "Equalizer Visualizer",
-        syncOffsetLabel = "Sync Offset"
+        syncOffsetLabel = "Sync Offset",
+        serversTab = "Servers",
+        recapTab = "Recap",
+        studioDspTitle = "Nevera Studio DSP",
+        signalPathTitle = "Audio Signal Path",
+        networkStorageTitle = "Lossless Network Storage",
+        perDeviceAutoProfile = "Per-Device Auto Audio Profile",
+        smartPrefetchLabel = "Smart Queue Prefetch Cache",
+        musicHapticsLabel = "Beat Music Haptics",
+        preferLosslessServer = "Auto-Upgrade to Lossless Server",
+        dualLineLabel = "Dual",
+        shareLyricCardLabel = "Share Lyric Card",
+        endOfTrackLabel = "End of Current Track",
+        saveQueueLabel = "Save Queue as Playlist"
     )
 
     private val indonesian = NeveraStrings(
@@ -290,7 +316,20 @@ object AppLocalization {
         translateLabel = "Terjemahkan",
         originalLabel = "Asli",
         visualizerLabel = "Visualizer Equalizer",
-        syncOffsetLabel = "Geser Timing"
+        syncOffsetLabel = "Geser Timing",
+        serversTab = "Server",
+        recapTab = "Rekap",
+        studioDspTitle = "Nevera Studio DSP",
+        signalPathTitle = "Jalur Sinyal Audio",
+        networkStorageTitle = "Server Lossless (NAS / Cloud)",
+        perDeviceAutoProfile = "Profil Audio Otomatis per Perangkat",
+        smartPrefetchLabel = "Smart Prefetch Cache Antrean",
+        musicHapticsLabel = "Getaran Irama (Music Haptics)",
+        preferLosslessServer = "Otomatis Upgrade ke Server Lossless",
+        dualLineLabel = "Dual",
+        shareLyricCardLabel = "Bagikan Kartu Lirik",
+        endOfTrackLabel = "Akhir Lagu Ini",
+        saveQueueLabel = "Simpan Antrean ke Playlist"
     )
 
     private val japanese = NeveraStrings(
@@ -383,7 +422,20 @@ object AppLocalization {
         translateLabel = "翻訳",
         originalLabel = "原文",
         visualizerLabel = "イコライザー表示",
-        syncOffsetLabel = "同期調整"
+        syncOffsetLabel = "同期調整",
+        serversTab = "サーバー",
+        recapTab = "統計",
+        studioDspTitle = "Nevera スタジオ DSP",
+        signalPathTitle = "オーディオ信号経路",
+        networkStorageTitle = "ロスレスネットワークサーバー",
+        perDeviceAutoProfile = "機器別オーディオプロファイル自動切替",
+        smartPrefetchLabel = "スマート先読みキャッシュ",
+        musicHapticsLabel = "ビート連動ハプティクス",
+        preferLosslessServer = "ロスレスサーバーへ自動切替",
+        dualLineLabel = "2行",
+        shareLyricCardLabel = "歌詞カードを共有",
+        endOfTrackLabel = "現在の曲の終了後",
+        saveQueueLabel = "キューをプレイリスト保存"
     )
 
     private val chinese = NeveraStrings(
@@ -476,7 +528,20 @@ object AppLocalization {
         translateLabel = "翻译",
         originalLabel = "原文",
         visualizerLabel = "频谱均衡器",
-        syncOffsetLabel = "同步微调"
+        syncOffsetLabel = "同步微调",
+        serversTab = "服务器",
+        recapTab = "年度统计",
+        studioDspTitle = "Nevera 母带级 DSP",
+        signalPathTitle = "音频信号路径",
+        networkStorageTitle = "无损网络音乐库",
+        perDeviceAutoProfile = "按输出设备自动切换音效",
+        smartPrefetchLabel = "智能队列预缓存",
+        musicHapticsLabel = "节拍触觉反馈",
+        preferLosslessServer = "优先切换至无损服务器",
+        dualLineLabel = "双语",
+        shareLyricCardLabel = "分享歌词海报",
+        endOfTrackLabel = "当前歌曲结束后停止",
+        saveQueueLabel = "保存队列为歌单"
     )
 
     private val javanese = NeveraStrings(
@@ -569,7 +634,20 @@ object AppLocalization {
         translateLabel = "Terjemah",
         originalLabel = "Asli",
         visualizerLabel = "Visualizer Equalizer",
-        syncOffsetLabel = "Atur Timing"
+        syncOffsetLabel = "Atur Timing",
+        serversTab = "Server",
+        recapTab = "Rekap",
+        studioDspTitle = "Nevera Studio DSP",
+        signalPathTitle = "Jalur Sinyal Audio",
+        networkStorageTitle = "Server Lossless (NAS / Cloud)",
+        perDeviceAutoProfile = "Profil Audio Otomatis per Piranti",
+        smartPrefetchLabel = "Smart Prefetch Cache Antrean",
+        musicHapticsLabel = "Getaran Irama Musik",
+        preferLosslessServer = "Otomatis Upgrade menyang Server Lossless",
+        dualLineLabel = "Dual",
+        shareLyricCardLabel = "Bagèkaké Kartu Lirik",
+        endOfTrackLabel = "Pungkasan Lagu Iki",
+        saveQueueLabel = "Simpen Antrean dadi Playlist"
     )
 
     private val sundanese = NeveraStrings(
@@ -662,7 +740,20 @@ object AppLocalization {
         translateLabel = "Tarjamah",
         originalLabel = "Asli",
         visualizerLabel = "Visualizer Equalizer",
-        syncOffsetLabel = "Luyukeun Timing"
+        syncOffsetLabel = "Luyukeun Timing",
+        serversTab = "Server",
+        recapTab = "Rekap",
+        studioDspTitle = "Nevera Studio DSP",
+        signalPathTitle = "Jalur Sinyal Audio",
+        networkStorageTitle = "Server Lossless (NAS / Cloud)",
+        perDeviceAutoProfile = "Profil Audio Otomatis per Alat",
+        smartPrefetchLabel = "Smart Prefetch Cache Antrean",
+        musicHapticsLabel = "Geter Wirahma Musik",
+        preferLosslessServer = "Otomatis Upgrade ka Server Lossless",
+        dualLineLabel = "Dual",
+        shareLyricCardLabel = "Bagikeun Kartu Lirik",
+        endOfTrackLabel = "Tungtung Lagu Ieu",
+        saveQueueLabel = "Simpen Antrean jadi Playlist"
     )
 }
 

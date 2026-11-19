@@ -1,15 +1,22 @@
 package com.nevera.corporation.data.native
 
+import com.nevera.corporation.data.model.AudiophileDspProfile
 import com.nevera.corporation.data.model.LyricWord
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.tanh
 
 /**
  * JNI bridge to C++17 native engine (libnevera_native.so),
@@ -42,6 +49,133 @@ object NeveraNativeEngine {
     private external fun nativeTransliterateKana(input: String): String
 
     private external fun nativeDetectJapaneseScript(input: String): Int
+
+    private external fun nativeDspCreate(sampleRate: Int, channels: Int): Long
+    private external fun nativeDspDestroy(handle: Long)
+    private external fun nativeDspReset(handle: Long)
+    private external fun nativeDspUpdateConfig(
+        handle: Long,
+        params: FloatArray,
+        freqs: FloatArray,
+        gains: FloatArray,
+        qs: FloatArray
+    )
+    private external fun nativeDspProcessFloatInterleaved(
+        handle: Long,
+        interleaved: FloatArray,
+        frameCount: Int
+    )
+    private external fun nativeDspComputeCurveDb(
+        freqs: FloatArray,
+        gains: FloatArray,
+        qs: FloatArray,
+        sampleRate: Int,
+        evalFreqs: FloatArray,
+        outDb: FloatArray
+    )
+
+    private val fallbackHandleSeq = AtomicLong(1L)
+    private val fallbackDsps = ConcurrentHashMap<Long, FallbackStudioDsp>()
+
+    fun dspCreate(sampleRate: Int, channels: Int): Long {
+        return if (isNativeLoaded) {
+            nativeDspCreate(sampleRate, channels)
+        } else {
+            val id = -fallbackHandleSeq.getAndIncrement()
+            fallbackDsps[id] = FallbackStudioDsp(sampleRate, channels)
+            id
+        }
+    }
+
+    fun dspDestroy(handle: Long) {
+        if (handle == 0L) return
+        if (isNativeLoaded && handle > 0L) {
+            nativeDspDestroy(handle)
+        } else {
+            fallbackDsps.remove(handle)
+        }
+    }
+
+    fun dspReset(handle: Long) {
+        if (handle == 0L) return
+        if (isNativeLoaded && handle > 0L) {
+            nativeDspReset(handle)
+        } else {
+            fallbackDsps[handle]?.reset()
+        }
+    }
+
+    fun dspUpdateProfile(handle: Long, profile: AudiophileDspProfile) {
+        if (handle == 0L) return
+        val bands = profile.normalizedBands()
+        val params = floatArrayOf(
+            if (profile.enabled) 1f else 0f,
+            if (profile.bitPerfectBypass) 1f else 0f,
+            profile.preampDb,
+            if (profile.autoPreamp) 1f else 0f,
+            profile.crossfeedMode.fcutHz,
+            profile.crossfeedMode.feedDb,
+            profile.stereoWidth,
+            profile.channelBalance,
+            profile.tubeWarmth,
+            if (profile.lufsNormalization) 1f else 0f,
+            profile.targetLufs
+        )
+        val freqs = FloatArray(bands.size) { bands[it].frequencyHz }
+        val gains = FloatArray(bands.size) { bands[it].gainDb }
+        val qs = FloatArray(bands.size) { bands[it].qFactor }
+
+        if (isNativeLoaded && handle > 0L) {
+            nativeDspUpdateConfig(handle, params, freqs, gains, qs)
+        } else {
+            fallbackDsps[handle]?.updateConfig(params, freqs, gains, qs)
+        }
+    }
+
+    fun dspProcessFloatInterleaved(handle: Long, interleaved: FloatArray, frameCount: Int) {
+        if (handle == 0L || frameCount <= 0) return
+        if (isNativeLoaded && handle > 0L) {
+            nativeDspProcessFloatInterleaved(handle, interleaved, frameCount)
+        } else {
+            fallbackDsps[handle]?.processInterleaved(interleaved, frameCount)
+        }
+    }
+
+    fun computeEqCurveDb(
+        profile: AudiophileDspProfile,
+        evalFreqs: FloatArray,
+        sampleRate: Int = 48000
+    ): FloatArray {
+        val out = FloatArray(evalFreqs.size)
+        if (evalFreqs.isEmpty()) return out
+        if (profile.bitPerfectBypass || !profile.enabled) return out
+        val bands = profile.normalizedBands()
+        val freqs = FloatArray(bands.size) { bands[it].frequencyHz }
+        val gains = FloatArray(bands.size) { bands[it].gainDb }
+        val qs = FloatArray(bands.size) { bands[it].qFactor }
+        if (isNativeLoaded) {
+            nativeDspComputeCurveDb(freqs, gains, qs, sampleRate, evalFreqs, out)
+        } else {
+            val sr = max(8000, sampleRate).toDouble()
+            val biquads = Array(bands.size) { idx ->
+                FallbackBiquad64().apply {
+                    val kind = when (idx) {
+                        0 -> 0
+                        bands.lastIndex -> 2
+                        else -> 1
+                    }
+                    configure(kind, sr, freqs[idx].toDouble(), gains[idx].toDouble(), qs[idx].toDouble())
+                }
+            }
+            for (k in evalFreqs.indices) {
+                var sum = 0.0
+                val ef = evalFreqs[k].toDouble().coerceIn(18.0, sr * 0.45)
+                for (bq in biquads) sum += bq.responseDb(ef, sr)
+                out[k] = if (sum.isFinite()) sum.coerceIn(-18.0, 18.0).toFloat() else 0f
+            }
+        }
+        return out
+    }
 
     fun allocateWordTimings(text: String, startMs: Long, endMs: Long): List<LyricWord> {
         val tokens = tokenizeWords(text)
@@ -374,4 +508,255 @@ object NeveraNativeEngine {
         'ら' to "ra", 'り' to "ri", 'る' to "ru", 'れ' to "re", 'ろ' to "ro",
         'わ' to "wa", 'を' to "wo", 'ん' to "n", 'ゔ' to "vu"
     )
+
+    private class FallbackBiquad64 {
+        var b0 = 1.0; var b1 = 0.0; var b2 = 0.0
+        var a1 = 0.0; var a2 = 0.0
+        var z1 = 0.0; var z2 = 0.0
+        var active = false
+
+        fun reset() { z1 = 0.0; z2 = 0.0 }
+
+        fun setIdentity() {
+            b0 = 1.0; b1 = 0.0; b2 = 0.0
+            a1 = 0.0; a2 = 0.0
+            active = false
+        }
+
+        fun configure(kind: Int, sampleRate: Double, freqHz: Double, gainDb: Double, q: Double) {
+            if (sampleRate <= 1000.0 || abs(gainDb) < 0.02) {
+                setIdentity()
+                return
+            }
+            val safeF = freqHz.coerceIn(18.0, sampleRate * 0.45)
+            val safeQ = q.coerceIn(0.35, 8.0)
+            val safeG = gainDb.coerceIn(-15.0, 15.0)
+            val a = 10.0.pow(safeG / 40.0)
+            val w0 = 2.0 * PI * safeF / sampleRate
+            val cosW = cos(w0)
+            val sinW = sin(w0)
+            val alpha = sinW / (2.0 * safeQ)
+
+            val nb0: Double; val nb1: Double; val nb2: Double
+            val na0: Double; val na1: Double; val na2: Double
+            when (kind) {
+                0 -> {
+                    val shelfRad = (a + 1.0 / a) * (1.0 / safeQ.coerceIn(0.4, 2.0) - 1.0) + 2.0
+                    val sAlpha = if (shelfRad > 0.0) 2.0 * sqrt(a) * (sinW / 2.0) * sqrt(shelfRad) else 2.0 * sqrt(a) * alpha
+                    nb0 = a * ((a + 1.0) - (a - 1.0) * cosW + sAlpha)
+                    nb1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW)
+                    nb2 = a * ((a + 1.0) - (a - 1.0) * cosW - sAlpha)
+                    na0 = (a + 1.0) + (a - 1.0) * cosW + sAlpha
+                    na1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW)
+                    na2 = (a + 1.0) + (a - 1.0) * cosW - sAlpha
+                }
+                2 -> {
+                    val shelfRad = (a + 1.0 / a) * (1.0 / safeQ.coerceIn(0.4, 2.0) - 1.0) + 2.0
+                    val sAlpha = if (shelfRad > 0.0) 2.0 * sqrt(a) * (sinW / 2.0) * sqrt(shelfRad) else 2.0 * sqrt(a) * alpha
+                    nb0 = a * ((a + 1.0) + (a - 1.0) * cosW + sAlpha)
+                    nb1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW)
+                    nb2 = a * ((a + 1.0) + (a - 1.0) * cosW - sAlpha)
+                    na0 = (a + 1.0) - (a - 1.0) * cosW + sAlpha
+                    na1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosW)
+                    na2 = (a + 1.0) - (a - 1.0) * cosW - sAlpha
+                }
+                else -> {
+                    nb0 = 1.0 + alpha * a
+                    nb1 = -2.0 * cosW
+                    nb2 = 1.0 - alpha * a
+                    na0 = 1.0 + alpha / a
+                    na1 = -2.0 * cosW
+                    na2 = 1.0 - alpha / a
+                }
+            }
+            if (abs(na0) < 1e-12) { setIdentity(); return }
+            b0 = nb0 / na0; b1 = nb1 / na0; b2 = nb2 / na0
+            a1 = na1 / na0; a2 = na2 / na0
+            active = true
+        }
+
+        fun process(x: Double): Double {
+            if (!active) return x
+            val y = b0 * x + z1
+            z1 = b1 * x - a1 * y + z2
+            z2 = b2 * x - a2 * y
+            return y
+        }
+
+        fun responseDb(freqHz: Double, sampleRate: Double): Double {
+            if (!active || sampleRate <= 1000.0) return 0.0
+            val w = 2.0 * PI * freqHz / sampleRate
+            val cw = cos(w); val sw = sin(w)
+            val c2w = cos(2.0 * w); val s2w = sin(2.0 * w)
+            val numR = b0 + b1 * cw + b2 * c2w
+            val numI = -b1 * sw - b2 * s2w
+            val denR = 1.0 + a1 * cw + a2 * c2w
+            val denI = -a1 * sw - a2 * s2w
+            val numSq = numR * numR + numI * numI
+            val denSq = max(1e-18, denR * denR + denI * denI)
+            return 10.0 * log10(max(1e-18, numSq / denSq))
+        }
+    }
+
+    private class FallbackStudioDsp(sr: Int, ch: Int) {
+        private val sampleRate = max(8000, sr).toDouble()
+        private val channels = ch.coerceIn(1, 8)
+        private var enabled = true
+        private var bitPerfectBypass = false
+        private var autoPreamp = true
+        private var lufsNorm = true
+        private var preampLinear = 1.0
+        private var stereoWidth = 1.0
+        private var balL = 1.0
+        private var balR = 1.0
+        private var tubeWarmth = 0.0
+        private var targetLufsLinear = 0.20
+        private val eqL = Array(10) { FallbackBiquad64() }
+        private val eqR = Array(10) { FallbackBiquad64() }
+        private var crossfeedActive = false
+        private var cfLpA0 = 0.0
+        private var cfLpB1 = 0.0
+        private var cfCrossGain = 0.0
+        private var cfDirectGain = 1.0
+        private var cfStateL = 0.0
+        private var cfStateR = 0.0
+        private var lufsEnergy = 0.04
+        private var lufsGain = 1.0
+        private var dcPrevInL = 0.0; private var dcPrevOutL = 0.0
+        private var dcPrevInR = 0.0; private var dcPrevOutR = 0.0
+        private var limEnv = 0.0
+
+        fun reset() {
+            eqL.forEach { it.reset() }
+            eqR.forEach { it.reset() }
+            cfStateL = 0.0; cfStateR = 0.0
+            lufsEnergy = 0.04; lufsGain = 1.0
+            dcPrevInL = 0.0; dcPrevOutL = 0.0
+            dcPrevInR = 0.0; dcPrevOutR = 0.0
+            limEnv = 0.0
+        }
+
+        fun updateConfig(params: FloatArray, freqs: FloatArray, gains: FloatArray, qs: FloatArray) {
+            if (params.size < 11) return
+            enabled = params[0] > 0.5f
+            bitPerfectBypass = params[1] > 0.5f
+            val manualPreamp = params[2].toDouble().coerceIn(-12.0, 6.0)
+            autoPreamp = params[3] > 0.5f
+            val cfFcut = params[4].toDouble()
+            val cfFeed = params[5].toDouble()
+            stereoWidth = params[6].toDouble().coerceIn(0.5, 1.6)
+            val balance = params[7].toDouble().coerceIn(-1.0, 1.0)
+            tubeWarmth = params[8].toDouble().coerceIn(0.0, 1.0)
+            lufsNorm = params[9] > 0.5f
+            targetLufsLinear = 10.0.pow(params[10].toDouble().coerceIn(-23.0, -9.0) / 20.0)
+            balL = if (balance > 0.0) 1.0 - balance else 1.0
+            balR = if (balance < 0.0) 1.0 + balance else 1.0
+
+            var maxPosGain = 0.0
+            val n = min(10, min(freqs.size, min(gains.size, qs.size)))
+            for (i in 0 until 10) {
+                if (i < n) {
+                    val kind = if (i == 0) 0 else if (i == 9) 2 else 1
+                    val g = gains[i].toDouble()
+                    if (g > maxPosGain) maxPosGain = g
+                    eqL[i].configure(kind, sampleRate, freqs[i].toDouble(), g, qs[i].toDouble())
+                    eqR[i].configure(kind, sampleRate, freqs[i].toDouble(), g, qs[i].toDouble())
+                } else {
+                    eqL[i].setIdentity(); eqR[i].setIdentity()
+                }
+            }
+            var effPreamp = manualPreamp
+            if (autoPreamp && maxPosGain > 0.1) effPreamp = min(manualPreamp, -(maxPosGain + 0.4))
+            preampLinear = 10.0.pow(effPreamp / 20.0)
+
+            if (cfFcut > 50.0 && cfFeed > 0.1) {
+                crossfeedActive = true
+                val x = exp(-2.0 * PI * cfFcut / sampleRate)
+                cfLpA0 = 1.0 - x
+                cfLpB1 = x
+                cfCrossGain = 10.0.pow(-cfFeed / 20.0)
+                cfDirectGain = 1.0 / (1.0 + cfCrossGain * 0.65)
+            } else {
+                crossfeedActive = false
+                cfCrossGain = 0.0
+                cfDirectGain = 1.0
+            }
+        }
+
+        fun processInterleaved(buf: FloatArray, frameCount: Int) {
+            if (!enabled || bitPerfectBypass || frameCount <= 0) return
+            val safeFrames = min(frameCount, buf.size / channels)
+            val limAttack = exp(-1.0 / (0.0005 * sampleRate))
+            val limRelease = exp(-1.0 / (0.065 * sampleRate))
+            val lufsAlpha = 1.0 - exp(-1.0 / (1.2 * sampleRate))
+            val lufsGainSlew = 1.0 - exp(-1.0 / (0.35 * sampleRate))
+            val dcCoeff = 1.0 - (2.0 * PI * 8.0 / sampleRate)
+            val ceiling = 0.966
+
+            if (channels == 1) {
+                for (f in 0 until safeFrames) {
+                    var x = buf[f].toDouble() * preampLinear
+                    for (b in 0 until 10) x = eqL[b].process(x)
+                    val absX = abs(x)
+                    limEnv = if (absX > limEnv) limAttack * limEnv + (1.0 - limAttack) * absX else limRelease * limEnv + (1.0 - limRelease) * absX
+                    if (limEnv > ceiling) x *= (ceiling / limEnv)
+                    if (abs(x) > 0.985) x = tanh(x) * 0.985
+                    buf[f] = if (x.isFinite()) x.coerceIn(-0.99, 0.99).toFloat() else 0f
+                }
+                return
+            }
+
+            for (f in 0 until safeFrames) {
+                val base = f * channels
+                var l = buf[base].toDouble() * preampLinear
+                var r = buf[base + 1].toDouble() * preampLinear
+                for (b in 0 until 10) {
+                    l = eqL[b].process(l)
+                    r = eqR[b].process(r)
+                }
+                if (crossfeedActive) {
+                    cfStateL = cfLpA0 * l + cfLpB1 * cfStateL
+                    cfStateR = cfLpA0 * r + cfLpB1 * cfStateR
+                    val outL = l * cfDirectGain + cfStateR * cfCrossGain * cfDirectGain
+                    val outR = r * cfDirectGain + cfStateL * cfCrossGain * cfDirectGain
+                    l = outL; r = outR
+                }
+                if (abs(stereoWidth - 1.0) > 0.005 || balL < 0.999 || balR < 0.999) {
+                    val mid = 0.5 * (l + r)
+                    val side = 0.5 * (l - r) * stereoWidth
+                    l = (mid + side) * balL
+                    r = (mid - side) * balR
+                }
+                if (lufsNorm) {
+                    val instPower = 0.5 * (l * l + r * r)
+                    if (instPower > 3.16e-6) {
+                        lufsEnergy += lufsAlpha * (instPower - lufsEnergy)
+                        val currentRms = sqrt(max(1e-8, lufsEnergy))
+                        val desired = (targetLufsLinear / currentRms).coerceIn(0.40, 2.0)
+                        lufsGain += lufsGainSlew * (desired - lufsGain)
+                    }
+                    l *= lufsGain; r *= lufsGain
+                }
+                if (tubeWarmth > 0.01) {
+                    val excL = l + tubeWarmth * 0.14 * (l * l - 0.5 * l * l * l)
+                    val excR = r + tubeWarmth * 0.14 * (r * r - 0.5 * r * r * r)
+                    val dcL = excL - dcPrevInL + dcCoeff * dcPrevOutL
+                    val dcR = excR - dcPrevInR + dcCoeff * dcPrevOutR
+                    dcPrevInL = excL; dcPrevOutL = dcL
+                    dcPrevInR = excR; dcPrevOutR = dcR
+                    l = dcL; r = dcR
+                }
+                val peak = max(abs(l), abs(r))
+                limEnv = if (peak > limEnv) limAttack * limEnv + (1.0 - limAttack) * peak else limRelease * limEnv + (1.0 - limRelease) * peak
+                if (limEnv > ceiling) {
+                    val gr = ceiling / limEnv
+                    l *= gr; r *= gr
+                }
+                if (abs(l) > 0.985) l = tanh(l) * 0.985
+                if (abs(r) > 0.985) r = tanh(r) * 0.985
+                buf[base] = if (l.isFinite()) l.coerceIn(-0.99, 0.99).toFloat() else 0f
+                buf[base + 1] = if (r.isFinite()) r.coerceIn(-0.99, 0.99).toFloat() else 0f
+            }
+        }
+    }
 }

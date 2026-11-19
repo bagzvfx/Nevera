@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -95,6 +96,7 @@ fun SyncedLyricsPanel(
     playheadState: State<PlaybackPlayhead>,
     accentColor: Color = Color.White,
     onSeekToMs: (Long) -> Unit,
+    onOpenShareCard: ((List<LyricLine>) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val strings = LocalStrings.current
@@ -184,39 +186,79 @@ fun SyncedLyricsPanel(
             }
 
             Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(if (showTranslated) accentColor.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.08f))
-                    .clickable(enabled = !isTranslating) {
-                        if (translatedLines != null) {
-                            showTranslated = !showTranslated
-                        } else {
-                            isTranslating = true
-                            scope.launch {
-                                translatedLines = NeveraLyricAiEngine.translateLyrics(
-                                    lyricsResult.lines,
-                                    settings.appLanguage.code
-                                )
-                                isTranslating = false
-                                showTranslated = true
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                // Dual-Line toggle (Original + Translated subtitle simultaneously)
+                if (showTranslated && translatedLines != null) {
+                    val dualOn = settings.dualLineLyrics
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (dualOn) accentColor.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.08f))
+                            .clickable {
+                                LibraryStore.updateSettings { it.copy(dualLineLyrics = !it.dualLineLyrics) }
+                            }
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = strings.dualLineLabel,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                // Translate chip
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(if (showTranslated) accentColor.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.08f))
+                        .clickable(enabled = !isTranslating) {
+                            if (translatedLines != null) {
+                                showTranslated = !showTranslated
+                            } else {
+                                isTranslating = true
+                                scope.launch {
+                                    translatedLines = NeveraLyricAiEngine.translateLyrics(
+                                        lyricsResult.lines,
+                                        settings.appLanguage.code
+                                    )
+                                    isTranslating = false
+                                    showTranslated = true
+                                }
                             }
                         }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    if (isTranslating) {
+                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.6.dp, color = Color.White)
+                    } else {
+                        Icon(Icons.Rounded.Translate, null, tint = Color.White, modifier = Modifier.size(13.dp))
                     }
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                if (isTranslating) {
-                    CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.6.dp, color = Color.White)
-                } else {
-                    Icon(Icons.Rounded.Translate, null, tint = Color.White, modifier = Modifier.size(13.dp))
+                    Text(
+                        text = if (showTranslated) strings.originalLabel else strings.translateLabel,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
-                Text(
-                    text = if (showTranslated) strings.originalLabel else strings.translateLabel,
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+
+                // Share Lyric Card button
+                if (onOpenShareCard != null) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .clickable { onOpenShareCard(lines) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(Icons.Rounded.Share, strings.shareLyricCardLabel, tint = Color.White, modifier = Modifier.size(14.dp))
+                    }
+                }
             }
         }
 
@@ -331,7 +373,8 @@ fun SyncedLyricsPanel(
                             onClick = { onSeekToMs(activeLine.timeMs) }
                         )
                     } else {
-                        val activeText = if (showTranslated && activeLine.translatedText.isNotBlank()) {
+                        val dualSubActive = showTranslated && settings.dualLineLyrics && activeLine.translatedText.isNotBlank()
+                        val activeText = if (showTranslated && !dualSubActive && activeLine.translatedText.isNotBlank()) {
                             activeLine.translatedText
                         } else {
                             activeLine.text
@@ -360,7 +403,7 @@ fun SyncedLyricsPanel(
                                 fontWeight = FontWeight.Bold
                             )
 
-                            if (activeLine.romajiText.isNotBlank() && !showTranslated) {
+                            if (activeLine.romajiText.isNotBlank() && (!showTranslated || dualSubActive)) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 KaraokeGlowBounceText(
                                     text = activeLine.romajiText,
@@ -372,6 +415,19 @@ fun SyncedLyricsPanel(
                                     litColor = accentColor.copy(alpha = 0.98f),
                                     accentColor = accentColor,
                                     fontWeight = FontWeight.SemiBold
+                                )
+                            }
+
+                            if (dualSubActive) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = activeLine.translatedText,
+                                    color = Color.White.copy(alpha = 0.72f),
+                                    fontSize = 14.sp,
+                                    lineHeight = 20.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
                                 )
                             }
                         }

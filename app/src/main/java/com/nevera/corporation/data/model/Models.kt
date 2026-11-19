@@ -7,7 +7,8 @@ enum class SourceKind {
     YOUTUBE,
     JIOSAAVN,
     SPOTIFY,
-    LOCAL
+    LOCAL,
+    NETWORK_SERVER
 }
 
 @Serializable
@@ -74,10 +75,22 @@ data class Song(
     val localUri: String = "",
     val directStreamUrl: String = "",
     val browseId: String = "",
-    val browseType: CollectionType? = null
+    val browseType: CollectionType? = null,
+    val codecHint: String = "",
+    val sampleRateHz: Int = 0,
+    val bitDepth: Int = 0,
+    val bitrateKbps: Int = 0,
+    val serverId: String = "",
+    val remotePath: String = ""
 ) {
     val durationMs: Long get() = durationSeconds * 1000L
     val isCollection: Boolean get() = browseId.isNotBlank() && sourceTrackId.isBlank()
+    val isLosslessHint: Boolean
+        get() = codecHint.equals("FLAC", true) ||
+            codecHint.equals("WAV", true) ||
+            codecHint.equals("ALAC", true) ||
+            codecHint.equals("AIFF", true) ||
+            codecHint.equals("DSD", true)
 
     val playbackUri: String
         get() = when {
@@ -147,7 +160,11 @@ data class SourceStream(
     val codec: String,
     val kbps: Int,
     val qualityLabel: String,
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    val sampleRateHz: Int = 0,
+    val bitDepth: Int = 0,
+    val isLossless: Boolean = false,
+    val originLabel: String = "Studio Stream"
 )
 
 @Serializable
@@ -166,5 +183,14 @@ data class AppSettingsState(
     val visualizerStyle: VisualizerStyle = VisualizerStyle.UPWARD_BARS,
     val lyricsOffsetMs: Long = 0L,
     val showAudioStats: Boolean = true,
-    val cacheLimitMb: Int = 256
+    val cacheLimitMb: Int = 512,
+    val dspProfile: AudiophileDspProfile = AudiophileDspProfile(),
+    val perDeviceProfiles: Map<String, AudiophileDspProfile> = emptyMap(),
+    val autoSwitchDeviceProfile: Boolean = true,
+    val smartQueuePrefetch: Boolean = true,
+    val musicHapticsEnabled: Boolean = false,
+    val preferPersonalLosslessServer: Boolean = true,
+    val dualLineLyrics: Boolean = false,
+    val playbackPitch: Float = 1.0f,
+    val tuning432Hz: Boolean = false
 )

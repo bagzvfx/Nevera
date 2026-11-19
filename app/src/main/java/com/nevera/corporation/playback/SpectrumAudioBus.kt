@@ -217,6 +217,9 @@ object SpectrumAudioBus {
             latestBassEnergy = chosen.bassEnergy
             latestVocalEnergy = chosen.vocalEnergy
             latestTrebleEnergy = chosen.trebleEnergy
+            if (chosen.beatPulse >= 0.90f && chosen.bassEnergy >= 0.30f) {
+                MusicHapticsEngine.onBeatDetected(chosen.bassEnergy)
+            }
             return true
         }
 
