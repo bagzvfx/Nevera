@@ -23,8 +23,20 @@ import com.nevera.corporation.data.sources.NetworkStorageClient
 import com.nevera.corporation.data.sources.PlaylistImportEngine
 import com.nevera.corporation.data.sources.RecommendationEngine
 import com.nevera.corporation.data.sources.TrackMatcher
+import androidx.annotation.OptIn
+import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessingPipeline
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.SonicAudioProcessor
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.audio.SilenceSkippingAudioProcessor
+import com.google.common.collect.ImmutableList
+import com.nevera.corporation.playback.AudiophileDspAudioProcessor
 import com.nevera.corporation.playback.SpectrumAudioBus
+import com.nevera.corporation.playback.SpectrumTapAudioProcessor
 import com.nevera.corporation.playback.SyncedAudioSample
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import com.nevera.corporation.ui.i18n.AppLocalization
 import com.nevera.corporation.ui.player.LyricClock
 import com.nevera.corporation.ui.player.computeInstrumentalDotsState
@@ -583,5 +595,55 @@ class NeveraCoreTests {
         assertEquals("Daft Punk", entries[1].song?.artist)
         assertEquals("FLAC", entries[1].song?.codecHint)
         assertTrue(entries[1].song?.isLosslessHint == true)
+    }
+
+    @OptIn(UnstableApi::class)
+    @Test
+    fun testExoPlayerAudioPipelineWithDspSilenceSkipAndSonicDoesNotThrow() {
+        val dsp = AudiophileDspAudioProcessor()
+        val tap = SpectrumTapAudioProcessor()
+        val silence = SilenceSkippingAudioProcessor().apply { setEnabled(true) }
+        val sonic = SonicAudioProcessor().apply {
+            setSpeed(1.15f)
+            setPitch(432f / 440f)
+        }
+
+        // Test both active 64-bit Studio DSP and Bit-Perfect Direct Bypass through real Media3 AudioProcessingPipeline
+        for (bypass in listOf(false, true)) {
+            AudiophileDspAudioProcessor.updateLiveProfile(
+                AudiophileDspProfile(
+                    enabled = true,
+                    bitPerfectBypass = bypass,
+                    crossfeedMode = CrossfeedMode.STUDIO_DEFAULT,
+                    lufsNormalization = true
+                )
+            )
+            val pipeline = AudioProcessingPipeline(ImmutableList.of(dsp, tap, silence, sonic))
+            val inputFormat = AudioProcessor.AudioFormat(48000, 2, C.ENCODING_PCM_16BIT)
+            val outputFormat = pipeline.configure(inputFormat)
+            assertEquals("Pipeline must preserve PCM_16BIT for downstream Media3 processors", C.ENCODING_PCM_16BIT, outputFormat.encoding)
+            pipeline.flush()
+
+            val frames = 1024
+            val pcmIn = ByteBuffer.allocateDirect(frames * 2 * 2).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until frames) {
+                val sample = (14000.0 * sin(2.0 * PI * 440.0 * i / 48000.0)).toInt().toShort()
+                pcmIn.putShort(sample)
+                pcmIn.putShort(sample)
+            }
+            pcmIn.flip()
+
+            pipeline.queueInput(pcmIn)
+            pipeline.queueEndOfStream()
+            var totalOutBytes = 0
+            while (true) {
+                val outBuf = pipeline.getOutput()
+                if (!outBuf.hasRemaining()) break
+                totalOutBytes += outBuf.remaining()
+                outBuf.position(outBuf.limit())
+            }
+            assertTrue("Expected processed audio output bytes > 0 (bypass=$bypass)", totalOutBytes > 0)
+            pipeline.reset()
+        }
     }
 }

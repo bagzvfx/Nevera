@@ -149,6 +149,7 @@ class PlaybackService : MediaLibraryService() {
                     }
 
                     val songId = uri.getQueryParameter("vid").orEmpty()
+                    StreamPrefetchManager.cancelIfPrefetching(songId)
                     val song = SourceResolver.getRegistered(songId)
                         ?: throw IOException("Metadata lagu tidak ditemukan untuk $songId")
 
@@ -180,8 +181,8 @@ class PlaybackService : MediaLibraryService() {
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
                 return DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(true)
-                    .setEnableAudioTrackPlaybackParams(true)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams || enableFloatOutput)
                     .setAudioProcessors(
                         arrayOf(
                             AudiophileDspAudioProcessor(),

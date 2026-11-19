@@ -27,15 +27,23 @@ import java.util.concurrent.atomic.AtomicBoolean
 @OptIn(UnstableApi::class)
 object StreamPrefetchManager {
 
-    private const val MAX_PREFETCH_BYTES_PER_TRACK = 96L * 1024L * 1024L // 96 MB cap per track
+    private const val MAX_PREFETCH_BYTES_PER_TRACK = 4L * 1024L * 1024L // 4 MB fast head pre-buffer (prevents SimpleCache span lock)
     private const val PREFETCH_AHEAD_COUNT = 2
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var activeJob: Job? = null
     @Volatile
     private var activeWriter: CacheWriter? = null
+    @Volatile
+    private var activePrefetchSongId: String? = null
     private val activeCancel = AtomicBoolean(false)
     private val recentlyPrefetched = ConcurrentHashMap<String, Long>()
+
+    fun cancelIfPrefetching(songId: String) {
+        if (songId.isNotBlank() && activePrefetchSongId == songId) {
+            cancel()
+        }
+    }
 
     fun prefetchUpcoming(context: Context, queue: List<Song>, currentIndex: Int) {
         val settings = LibraryStore.settings.value
@@ -87,12 +95,15 @@ object StreamPrefetchManager {
 
                     val ds: CacheDataSource = cacheDsFactory.createDataSource()
                     val writer = CacheWriter(ds, specBuilder.build(), null, null)
+                    activePrefetchSongId = song.id
                     activeWriter = writer
                     writer.cache()
                     activeWriter = null
+                    activePrefetchSongId = null
                     recentlyPrefetched[cacheKey] = System.currentTimeMillis()
                 } catch (_: Throwable) {
                     activeWriter = null
+                    activePrefetchSongId = null
                 }
             }
         }
@@ -105,6 +116,7 @@ object StreamPrefetchManager {
         } catch (_: Throwable) {
         }
         activeWriter = null
+        activePrefetchSongId = null
         activeJob?.cancel()
         activeJob = null
     }

@@ -133,15 +133,14 @@ object InnerTubeXResolver {
         val cleanId = videoId.trim()
         if (cleanId.isBlank()) return null
 
-        val quality = when {
-            maxKbps <= 96 -> AudioQuality.LOW
-            maxKbps >= 160 -> AudioQuality.HIGH
-            else -> AudioQuality.AUTO
-        }
-
         val skipped = excludedByTrack.getOrPut(cleanId) { ConcurrentHashMap.newKeySet() }
 
-        repeat(MAX_ATTEMPTS) {
+        repeat(MAX_ATTEMPTS) { attempt ->
+            val quality = when {
+                maxKbps <= 96 -> AudioQuality.LOW
+                maxKbps >= 160 && attempt == 0 -> AudioQuality.HIGH
+                else -> AudioQuality.AUTO
+            }
             val stream = try {
                 innerTube.locale = YouTubeLocale(gl = "ID", hl = "id")
                 extractor.extract(
@@ -154,7 +153,14 @@ object InnerTubeXResolver {
                 )
             } catch (_: Exception) {
                 null
-            } ?: return null
+            }
+            if (stream == null) {
+                // Retry with AUTO quality if HIGH attempt returned null
+                if (attempt == 0 && quality == AudioQuality.HIGH) {
+                    return@repeat
+                }
+                return null
+            }
 
             if (stream.sabrBootstrap == null && stream.audioUrl.isNotBlank()) {
                 val ok = StreamProbe.isPlayable(stream.audioUrl, stream.headers)
