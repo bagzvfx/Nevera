@@ -1,0 +1,124 @@
+name: Build Nevera Android APK
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nevera-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    name: Test, Build & Release Nevera APK (Phone)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          echo "LASTFM_API_KEY=${{ secrets.LASTFM_API_KEY }}" > local.properties
+          echo "LASTFM_SECRET=${{ secrets.LASTFM_SECRET }}" >> local.properties
+          echo "LISTEN_TOGETHER_SERVER=${{ secrets.LISTEN_TOGETHER_SERVER }}" >> local.properties
+
+      - name: Setup Release Keystore (if configured)
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > nevera-release.jks
+            {
+              echo "storeFile=nevera-release.jks"
+              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
+              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
+              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
+            } > keystore.properties
+            echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_keystore=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run Unit Tests
+        run: ./gradlew testProdDebugUnitTest --stacktrace
+
+      - name: Build Nevera Prod Debug APK
+        run: ./gradlew assembleProdDebug --stacktrace
+
+      - name: Build Nevera Prod Release APK (Signed)
+        if: steps.keystore.outputs.has_keystore == 'true'
+        run: ./gradlew assembleProdRelease --stacktrace
+
+      - name: Prepare Versioned Release APKs
+        id: version
+        run: |
+          VER=$(grep 'bitchordVersionName' build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          mkdir -p release-assets
+          if [ "${{ steps.keystore.outputs.has_keystore }}" = "true" ]; then
+            SRC_DIR="app/build/outputs/apk/prod/release"
+          else
+            SRC_DIR="app/build/outputs/apk/prod/debug"
+          fi
+          ARM64=$(ls "$SRC_DIR"/*arm64-v8a*.apk | head -n 1)
+          UNIV=$(ls "$SRC_DIR"/*universal*.apk | head -n 1)
+          cp "$ARM64" "release-assets/Nevera-v${VER}-arm64.apk"
+          cp "$UNIV" "release-assets/Nevera-v${VER}-universal.apk"
+          ls -lh release-assets/
+
+      - name: Upload Nevera APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nevera-v${{ steps.version.outputs.version }}-APK
+          path: release-assets/*.apk
+          retention-days: 14
+
+      - name: Publish Public GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Nevera v${{ steps.version.outputs.version }}
+          make_latest: true
+          body: |
+            ## Nevera v${{ steps.version.outputs.version }}
+
+            - **Playback Lirik Tanpa Glitch + Smart Vocal Timing**: Memperbaiki artefak potong di atas/bawah huruf pada baris terlipat (100% bersih), ditambah timing adaptif pintar yang menyesuaikan panjang nada vokal (nada panjang otomatis mengembang, mengapung & memancarkan glow halus).
+            - **Efek Khusus Lirik (Spirit Particles + Live Bass Waveform)**: Partikel cahaya halus & gelombang bass lembut yang berpacu langsung bersama lirik playback dan overlay.
+            - **Bass-Only Glow Selaras Warna Sampul**: Efek cahaya playback kini 100% mengikuti ritme bass dengan transisi tone warna halus yang otomatis menyatu dengan warna background/sampul lagu.
+            - **Share Lirik Hingga 1 Menit 30 Detik + Efek Sync Beat (Transform & Shake)**: Tanpa batas karakter ketat, auto-scroll halus untuk pilihan lirik panjang, animasi karaoke identik playback, serta toggle khusus **Efek Sync Beat (Shake & Transform)** pada video MP4 yang dibagikan.
+            - **Overlay Lirik Borderless Super Mulus**: Clock terkalibrasi (anti-stutter 60/120fps) dengan animasi karaoke & partikel spirit identik playback.
+
+            **Pilih APK:**
+            - `Nevera-v${{ steps.version.outputs.version }}-arm64.apk` (Direkomendasikan untuk mayoritas HP Android modern, lebih ringan)
+            - `Nevera-v${{ steps.version.outputs.version }}-universal.apk` (Semua arsitektur CPU)
+          files: |
+            release-assets/Nevera-v${{ steps.version.outputs.version }}-arm64.apk
+            release-assets/Nevera-v${{ steps.version.outputs.version }}-universal.apk
+
+      - name: Upload Test Reports on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports
+          path: app/build/reports/tests/
