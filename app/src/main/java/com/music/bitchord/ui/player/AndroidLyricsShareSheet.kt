@@ -141,16 +141,32 @@ internal fun AndroidLyricsShareSheet(
     var fxTemplate by remember(request) { mutableStateOf(ShareFxTemplate.VINYL_PLAQUE) }
     var previewAudioEnabled by remember(request) { mutableStateOf(true) }
     var crossfadeEnabled by remember(request) { mutableStateOf(true) }
+    // The song's music video as the share's background, resolved once when
+    // video is first wanted (it is a network ask, so not for image shares).
+    // mvChecked separates "not asked yet" from "asked, and there is none":
+    // the toggle below only appears when there is one.
+    var musicVideoWanted by remember(request) { mutableStateOf(false) }
+    var musicVideo by remember(request) { mutableStateOf<ShareMusicVideo?>(null) }
+    var mvChecked by remember(request) { mutableStateOf(false) }
+    LaunchedEffect(request, asVideo) {
+        if (asVideo && !mvChecked) {
+            musicVideo = runCatching { resolveShareMusicVideo(request.song) }.getOrNull()
+            mvChecked = true
+        }
+    }
+    val mvActive = musicVideoWanted && musicVideo != null
     val clip = background.source?.takeIf { asVideo }?.let(clips::get)?.let { found ->
         // A story is 9:16: the 3:4 rendition crops to it with less thrown away.
         if (story) found.copy(url = found.portraitUrl ?: found.url) else found
     }
+    // The music video replaces the Canvas clip as the moving background.
+    val activeClip = if (mvActive) null else clip
     // Synced lines carry where they are sung: the share becomes a video of
     // that stretch of the song, each line lighting up as the vocal reaches it.
     val timeline = remember(request) { shareTimeline(request.lines) }
     // Nothing would move in a video with no vocal to follow and no clip.
-    val videoPossible = timeline != null || clips.isNotEmpty()
-    val isVideo = asVideo && (clip != null || timeline != null)
+    val videoPossible = timeline != null || clips.isNotEmpty() || musicVideo != null
+    val isVideo = asVideo && (clip != null || timeline != null || mvActive)
     // Saving runs from the tap until the file is in the gallery: the export,
     // then the copy. "Saved!" only once both are done.
     var saving by remember(request) { mutableStateOf(false) }
@@ -206,7 +222,7 @@ internal fun AndroidLyricsShareSheet(
     // preview runs it on the song's own clock, so what is shared is what was
     // seen. [image] is the still card, for the frame's shape and for a PNG.
     var painter by remember(request) { mutableStateOf<LyricsCardPainter?>(null) }
-    LaunchedEffect(request, story, showLogo, background, asVideo, fxTemplate, crossfadeEnabled) {
+    LaunchedEffect(request, story, showLogo, background, asVideo, fxTemplate, crossfadeEnabled, musicVideoWanted, musicVideo) {
         image = null
         painter = null
         failed = false
@@ -218,7 +234,9 @@ internal fun AndroidLyricsShareSheet(
                 card = request,
                 story = story,
                 showLogo = showLogo,
-                transparent = clip != null,
+                // No backdrop of its own over a moving background: a Canvas
+                // clip, or the music video when that is the background.
+                transparent = activeClip != null || mvActive,
                 fxTemplate = activeFx,
                 crossfade = crossfadeEnabled && isVideo,
             )
@@ -233,7 +251,7 @@ internal fun AndroidLyricsShareSheet(
     var exportProgress by remember(request) { mutableIntStateOf(0) }
     var exported by remember(request) { mutableStateOf<Pair<Any, File>?>(null) }
     suspend fun videoFile(): File? {
-        val look = listOf(clip, story, showLogo, fxTemplate, crossfadeEnabled)
+        val look = listOf(activeClip, story, showLogo, fxTemplate, crossfadeEnabled, mvActive)
         exported?.takeIf { it.first == look && it.second.exists() }?.let { return it.second }
         exporting = true
         exportProgress = 0
@@ -245,15 +263,16 @@ internal fun AndroidLyricsShareSheet(
                 card = request,
                 story = story,
                 showLogo = showLogo,
-                transparent = clip != null,
+                transparent = activeClip != null || mvActive,
                 fxTemplate = fxTemplate,
                 crossfade = crossfadeEnabled,
             )
             exportLyricsVideo(
-                context, request, clip, overlay,
+                context, request, activeClip, overlay,
                 portrait = story,
                 crossfade = crossfadeEnabled,
                 onProgress = { percent -> exportProgress = percent },
+                musicVideo = if (mvActive) musicVideo else null,
             )?.also { exported = look to it }
         } finally {
             exporting = false
@@ -296,7 +315,7 @@ internal fun AndroidLyricsShareSheet(
             )
 
             if (asVideo && videoPossible) {
-                // 5-Template 3D Motion FX Picker Row
+                // 7-Template 3D Motion FX Picker Row
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -371,12 +390,12 @@ internal fun AndroidLyricsShareSheet(
                         color = Color.White.copy(alpha = 0.75f),
                     )
                 }
-            } else if (clip != null) {
+            } else if (activeClip != null) {
                 // The clip live under the card, blurred and dimmed the way the
                 // export draws it.
                 Box(modifier = preview, contentAlignment = Alignment.Center) {
                     CanvasArtworkPlayer(
-                        canvas = clip,
+                        canvas = activeClip,
                         isPlaying = true,
                         modifier = Modifier.matchParentSize().blur(PREVIEW_BLUR),
                     )
@@ -472,6 +491,39 @@ internal fun AndroidLyricsShareSheet(
                             modifier = Modifier.weight(1f),
                         )
                         IosSwitch(checked = crossfadeEnabled, onCheckedChange = null)
+                    }
+                }
+
+                // Only offered once the song's music video has actually been
+                // resolved: a toggle for a video that may not exist would
+                // mostly be a toggle that does nothing. The preview keeps
+                // showing the card alone — the video deck's surface belongs
+                // to the playing song, not to this sheet — so what changes
+                // here is the export: the video under the words, dimmed.
+                if (musicVideo != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(PlainFill)
+                            .toggleable(
+                                value = musicVideoWanted,
+                                role = Role.Switch,
+                                onValueChange = {
+                                    haptics.play(Haptic.Tap)
+                                    musicVideoWanted = it
+                                },
+                            )
+                            .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Latar Video Musik",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.White,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IosSwitch(checked = musicVideoWanted, onCheckedChange = null)
                     }
                 }
             }

@@ -83,10 +83,15 @@ internal class NeveraSharePlaqueRenderer(
     private val plaqueBitmap = Bitmap.createBitmap(plaqueW, plaqueH, Bitmap.Config.ARGB_8888)
     private val plaqueCanvas = Canvas(plaqueBitmap)
 
-    // Offscreen card surface for 3D Holo Deck card & Projector Polaroid print
+    // Offscreen card surface for 3D Holo Deck card & Projector Polaroid print.
+    // Rendered at 2x the logical 420x504 space and downscaled by the draw
+    // matrices: the Polaroid print is shown at ~1.18x logical size, so a 1x
+    // bitmap came out visibly soft/pixelated (its title text especially).
     private val holoCardW = 420
     private val holoCardH = 504
-    private val holoCardBitmap = Bitmap.createBitmap(holoCardW, holoCardH, Bitmap.Config.ARGB_8888)
+    private val holoCardBitmap = Bitmap.createBitmap(
+        holoCardW * HOLO_CARD_SS, holoCardH * HOLO_CARD_SS, Bitmap.Config.ARGB_8888,
+    )
     private val holoCardCanvas = Canvas(holoCardBitmap)
 
     private val camera = Camera()
@@ -447,9 +452,12 @@ internal class NeveraSharePlaqueRenderer(
         camera.getMatrix(matrix)
         camera.restore()
         matrix.preTranslate(-holoCardW * 0.5f, -holoCardH * 0.5f)
+        matrix.preScale(1f / HOLO_CARD_SS, 1f / HOLO_CARD_SS)
         matrix.postScale(cardScale, cardScale)
         matrix.postTranslate(w * 0.5f, h * 0.505f + hoverY)
         canvas.drawBitmap(holoCardBitmap, matrix, bitmapPaint)
+
+        if (showLogo) drawShareCredit(canvas, w, h)
 
         // 5. Front 3D Orbital Arcs + Twinkling Starlight Dots
         drawHoloOrbitalArcs(canvas, w, h, tSec, front = true, arcColor = Color.argb(230, 232, 242, 255))
@@ -458,6 +466,9 @@ internal class NeveraSharePlaqueRenderer(
     private fun renderHoloDeckAlbumCard(tSec: Float, posMs: Long, progress: Float, bass: Float) {
         holoCardBitmap.eraseColor(Color.TRANSPARENT)
         val c = holoCardCanvas
+        // Draw in logical 420x504 space on the 2x surface (see holoCardBitmap).
+        c.save()
+        c.scale(HOLO_CARD_SS.toFloat(), HOLO_CARD_SS.toFloat())
         val bw = holoCardW.toFloat()
         val bh = holoCardH.toFloat()
         val rect = RectF(4f, 4f, bw - 4f, bh - 4f)
@@ -503,10 +514,10 @@ internal class NeveraSharePlaqueRenderer(
         val barStart = 76f
         val barEnd = bw - 82f
         val dots = 22
-        val litCount = (progress * dots).toInt()
+        val litCount = (progress * dots).roundToInt().coerceIn(0, dots)
         for (d in 0 until dots) {
             val dx = barStart + (d.toFloat() / (dots - 1)) * (barEnd - barStart)
-            val isLit = d <= litCount
+            val isLit = d < litCount
             val dh = if (isLit) (5f + ((d * 7) % 5) * 2.4f) else 4.2f
             paint.color = if (isLit) Color.WHITE else Color.argb(95, 255, 255, 255)
             c.drawRoundRect(dx - 2.2f, by - dh * 0.5f, dx + 2.2f, by + dh * 0.5f, 2.2f, 2.2f, paint)
@@ -521,6 +532,7 @@ internal class NeveraSharePlaqueRenderer(
         strokePaint.color = Color.argb(195, 230, 240, 255)
         strokePaint.strokeWidth = 4f
         c.drawRoundRect(rect, 26f, 26f, strokePaint)
+        c.restore()
     }
 
     private fun drawHoloOrbitalArcs(canvas: Canvas, w: Float, h: Float, tSec: Float, front: Boolean, arcColor: Int) {
@@ -733,14 +745,33 @@ internal class NeveraSharePlaqueRenderer(
         camera.getMatrix(matrix)
         camera.restore()
         matrix.preTranslate(-holoCardW * 0.5f, -holoCardH * 0.5f)
+        matrix.preScale(1f / HOLO_CARD_SS, 1f / HOLO_CARD_SS)
         matrix.postScale(polScale, polScale)
         matrix.postTranslate(polCx, polCy)
         canvas.drawBitmap(holoCardBitmap, matrix, bitmapPaint)
+
+        if (showLogo) drawShareCredit(canvas, w, h)
+    }
+
+    /**
+     * The "Nevera" credit for the two scenes whose cards deliberately carry no
+     * branding of their own (Holo Deck, Projector Polaroid): the sheet's
+     * Show-logo toggle was silently ignored by them, so when it is on the
+     * credit sits small in the frame's bottom-right corner instead.
+     */
+    private fun drawShareCredit(canvas: Canvas, w: Float, h: Float) {
+        val credit = fonts.body(25f, Color.argb(165, 238, 240, 248), bold = true).apply {
+            textAlign = Paint.Align.RIGHT
+        }
+        canvas.drawText("Nevera", w - 34f, h - 30f, credit)
     }
 
     private fun renderPolaroidPrint() {
         holoCardBitmap.eraseColor(Color.TRANSPARENT)
         val c = holoCardCanvas
+        // Draw in logical 420x504 space on the 2x surface (see holoCardBitmap).
+        c.save()
+        c.scale(HOLO_CARD_SS.toFloat(), HOLO_CARD_SS.toFloat())
         val bw = holoCardW.toFloat()
         val bh = holoCardH.toFloat()
 
@@ -765,6 +796,7 @@ internal class NeveraSharePlaqueRenderer(
             if (i % 2 == 0) c.drawRect(bx, footY - 13f, bx + wBar, footY + 13f, paint)
             bx += pattern[i] * 2.7f
         }
+        c.restore()
     }
 
     /**
@@ -823,7 +855,7 @@ internal class NeveraSharePlaqueRenderer(
             if (focus > 0.18f) {
                 scriptPaint.textSize = baseFontSize
                 scriptPaint.maskFilter = if (blurPx > 0.6f) BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL) else null
-                val wrapped = wrapLines(line.text, scriptPaint, maxW).take(2)
+                val wrapped = cappedRows(wrapLines(line.text, scriptPaint, maxW), scriptPaint, maxW, 2)
                 val lh = baseFontSize * 1.15f
                 val y0 = -((wrapped.size - 1) * lh) * 0.5f
 
@@ -842,8 +874,11 @@ internal class NeveraSharePlaqueRenderer(
                     val startX = -rowW * 0.5f
                     val y = y0 + rIdx * lh
 
-                    // Unsung soft base
+                    // Unsung soft base. The sweep below leaves its own alpha on
+                    // this shared paint, which Android multiplies into the color
+                    // alpha — reset it or every later row (and frame) bases dimmer.
                     scriptPaint.shader = null
+                    scriptPaint.alpha = 255
                     scriptPaint.color = Color.argb((110 * alpha).roundToInt(), 225, 232, 248)
                     canvas.drawText(rowText, startX, y, scriptPaint)
 
@@ -1194,7 +1229,7 @@ internal class NeveraSharePlaqueRenderer(
         centerY: Float,
         maxW: Float,
     ) {
-        val wrapped = wrapLines(line.text, monoPaint, maxW).take(3)
+        val wrapped = cappedRows(wrapLines(line.text, monoPaint, maxW), monoPaint, maxW, 3)
         val lh = 44f
         val startY = centerY - ((wrapped.size - 1) * lh) * 0.5f
         val totalLen = line.text.length.coerceAtLeast(1)
@@ -1210,6 +1245,11 @@ internal class NeveraSharePlaqueRenderer(
             cursorOffset = rowStart + rowText.length
             var cx = x
             val baseline = startY + rowIdx * lh
+            // The unsung copy underneath, as the karaoke plaques draw theirs:
+            // without it the line's tail was simply invisible until the sweep
+            // reached it, so words popped in from nothing instead of lighting up.
+            monoPaint.color = Color.argb(96, 246, 241, 234)
+            canvas.drawText(rowText, cx, baseline, monoPaint)
             for (k in rowText.indices) {
                 val globalIdx = rowStart + k
                 val chW = monoPaint.measureText(rowText, k, k + 1)
@@ -1242,7 +1282,7 @@ internal class NeveraSharePlaqueRenderer(
         fontSize: Float,
     ) {
         val textPaint = fonts.heading(fontSize, Color.WHITE)
-        val wrapped = wrapLines(line.text, textPaint, width).take(3)
+        val wrapped = cappedRows(wrapLines(line.text, textPaint, width), textPaint, width, 3)
         val lh = fontSize * 1.28f
         val startY = centerY - ((wrapped.size - 1) * lh) * 0.45f
         val totalLen = line.text.length.coerceAtLeast(1)
@@ -1317,6 +1357,21 @@ internal class NeveraSharePlaqueRenderer(
         canvas.drawCircle(fillX, y, 9.5f, paint)
     }
 
+    /**
+     * [wrapped] capped at [maxRows] rows. The cap used to be a plain `take(n)`,
+     * which silently deleted the rest of the line — a long lyric just stopped
+     * mid-sentence. Now the last kept row is ellipsised, so the cut reads as a
+     * cut. (The ellipsised row no longer appears verbatim in the line's text;
+     * the row-start lookups in the draw functions already fall back to their
+     * running cursor when `indexOf` misses.)
+     */
+    private fun cappedRows(wrapped: List<String>, p: Paint, maxW: Float, maxRows: Int): List<String> {
+        if (wrapped.size <= maxRows) return wrapped
+        val kept = wrapped.take(maxRows).toMutableList()
+        kept[maxRows - 1] = ellipsised(kept[maxRows - 1], p, maxW)
+        return kept
+    }
+
     private fun wrapLines(text: String, p: Paint, maxW: Float): List<String> {
         val src = text.trim()
         if (src.isEmpty()) return listOf("")
@@ -1356,3 +1411,6 @@ internal fun shareCrossfadeEnvelope(elapsedMs: Long, totalMs: Long): Float {
 
 internal const val SHARE_CROSSFADE_IN_MS = 850f
 internal const val SHARE_CROSSFADE_OUT_MS = 1_150f
+
+/** Supersampling of the Holo Deck / Polaroid card surface: drawn at 2x, shown at ~1x. */
+internal const val HOLO_CARD_SS = 2

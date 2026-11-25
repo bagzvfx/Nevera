@@ -20,6 +20,7 @@ import androidx.media3.common.util.Clock
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSourceBitmapLoader
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
@@ -27,7 +28,10 @@ import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.transformer.DefaultAssetLoaderFactory
 import androidx.media3.transformer.DefaultDecoderFactory
 import com.music.bitchord.playback.AudioCache
+import com.music.bitchord.playback.ChunkedDataSource
+import com.music.bitchord.data.Http
 import com.music.bitchord.data.YtMusicRepository
+import com.music.bitchord.data.innertube.InnerTubeXResolver
 import com.music.bitchord.data.model.SearchFilter
 import com.music.bitchord.data.model.SearchResult
 import com.music.bitchord.data.model.Song
@@ -141,6 +145,13 @@ internal suspend fun exportLyricsVideo(
     crossfade: Boolean = true,
     /** Render progress 0..100 while the video is encoded (0.1-beta); the sheet draws it as a percent bar. */
     onProgress: (Int) -> Unit = {},
+    /**
+     * The song's music video as the animated background instead of [clip] or
+     * the still backdrop, from [resolveShareMusicVideo]. Tried first; any
+     * failure falls back to the clip / backdrop paths below, so asking for it
+     * can never make a share that would have worked fail.
+     */
+    musicVideo: ShareMusicVideo? = null,
 ): File? {
     val folder = File(context.cacheDir, SHARE_FOLDER).apply { mkdirs() }
     val out = File(folder, VIDEO_FILE_NAME)
@@ -152,7 +163,10 @@ internal suspend fun exportLyricsVideo(
     val overlay = SyncedOverlay(painter, timeline, width, height, lengthMs)
 
     // The still backdrop, as an image the export can hold for the video's length.
-    val backdrop = if (clip == null) {
+    // Also rendered when a music video is asked for: it is the fallback if the
+    // video stream can't be read, so its failure only ends the export when
+    // there is no clip to fall back to either.
+    val backdrop = if (clip == null || musicVideo != null) {
         withContext(Dispatchers.IO) {
             runCatching {
                 val file = File(folder, BACKDROP_FILE_NAME)
@@ -160,10 +174,12 @@ internal suspend fun exportLyricsVideo(
                 file.outputStream().use { picture.compress(Bitmap.CompressFormat.PNG, 100, it) }
                 file
             }.getOrNull()
-        } ?: return null
+        }
     } else {
         null
     }
+    // Nothing to sit the card on at all: no clip, no music video, no backdrop.
+    if (backdrop == null && clip == null && musicVideo == null) return null
     val urls = clip?.let {
         listOfNotNull(it.portraitUrl.takeIf { portrait }, it.url, it.fallbackUrl).distinct()
     }
@@ -175,6 +191,34 @@ internal suspend fun exportLyricsVideo(
 
     suspend fun attempt(withAudio: Boolean): Boolean {
         val audio = if (withAudio) opus ?: return false else null
+        if (musicVideo != null) {
+            // The music video as the base layer: cropped to the frame and
+            // dimmed, the (transparent) card over it. Its own audio is dropped
+            // — the song's Opus sequence is the soundtrack, as with a Canvas.
+            val item = EditedMediaItem.Builder(
+                MediaItem.Builder()
+                    .setUri(musicVideo.url)
+                    .setTag(MvBackground)
+                    .build(),
+            )
+                .setRemoveAudio(true)
+                .setEffects(mvEffects(width, height))
+                .build()
+            val video = if (audio != null) {
+                EditedMediaItemSequence.Builder(item).setIsLooping(true).build()
+            } else {
+                probeLengthMs(context, musicVideo.url, mvSourceFactory(musicVideo.headers))?.let { length ->
+                    val repeats = ceil(lengthMs / length.toDouble()).toInt().coerceIn(1, MAX_REPEATS)
+                    EditedMediaItemSequence.Builder(List(repeats) { item }).build()
+                }
+            }
+            if (video != null &&
+                transform(context, video, audio, overlay, out, lengthMs, crossfade, onProgress, musicVideo)
+            ) {
+                return true
+            }
+            // Fall through: the clip / still-backdrop paths below still apply.
+        }
         if (backdrop != null) {
             val still = EditedMediaItem.Builder(
                 MediaItem.Builder()
@@ -214,6 +258,33 @@ internal suspend fun exportLyricsVideo(
 @androidx.annotation.OptIn(UnstableApi::class)
 private fun fit(width: Int, height: Int) =
     Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP)
+
+/**
+ * The music video under the words: cropped to fill the frame, then dimmed to
+ * [MV_DIM] — the scrim that keeps white lyric type readable over a moving
+ * picture. No blur: unlike a Canvas clip it is the thing being shown.
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+private fun mvEffects(width: Int, height: Int) = Effects(
+    emptyList(),
+    listOf(
+        fit(width, height),
+        RgbAdjustment.Builder().setRedScale(MV_DIM).setGreenScale(MV_DIM).setBlueScale(MV_DIM).build(),
+    ),
+)
+
+/** Reads a music-video stream: the app's HTTP client wearing the headers its URL was minted with. */
+@androidx.annotation.OptIn(UnstableApi::class)
+private fun mvDataSourceFactory(headers: Map<String, String>): DataSource.Factory =
+    ChunkedDataSource.Factory(
+        OkHttpDataSource.Factory(Http.client).setDefaultRequestProperties(headers),
+        MV_CHUNK_BYTES,
+    )
+
+/** The media-source factory [transform] routes music-video items through. */
+@androidx.annotation.OptIn(UnstableApi::class)
+private fun mvSourceFactory(headers: Map<String, String>): MediaSource.Factory =
+    DefaultMediaSourceFactory(mvDataSourceFactory(headers))
 
 /**
  * Blurred at a quarter of the size and scaled back up: the same picture as
@@ -328,32 +399,42 @@ private class ShareAudioFadeProcessor(
 /**
  * Which items are the song: those go through the player's chain, everything
  * else — the cover clip, Apple's HLS — through a plain one, so the clip never
- * lands in the audio cache or in front of the stream resolver.
+ * lands in the audio cache or in front of the stream resolver. Music-video
+ * items go through their own factory too: their googlevideo URL only answers
+ * a fetch wearing the headers it was minted with.
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 private class RoutingSourceFactory(
     private val plain: MediaSource.Factory,
     private val song: MediaSource.Factory,
+    private val video: MediaSource.Factory = plain,
 ) : MediaSource.Factory {
     override fun setDrmSessionManagerProvider(provider: DrmSessionManagerProvider): MediaSource.Factory = apply {
         plain.setDrmSessionManagerProvider(provider)
         song.setDrmSessionManagerProvider(provider)
+        video.setDrmSessionManagerProvider(provider)
     }
 
     override fun setLoadErrorHandlingPolicy(policy: LoadErrorHandlingPolicy): MediaSource.Factory = apply {
         plain.setLoadErrorHandlingPolicy(policy)
         song.setLoadErrorHandlingPolicy(policy)
+        video.setLoadErrorHandlingPolicy(policy)
     }
 
     override fun getSupportedTypes(): IntArray = plain.supportedTypes
 
-    override fun createMediaSource(mediaItem: MediaItem): MediaSource =
-        if (mediaItem.localConfiguration?.tag === SongAudio) song.createMediaSource(mediaItem)
-        else plain.createMediaSource(mediaItem)
+    override fun createMediaSource(mediaItem: MediaItem): MediaSource = when (mediaItem.localConfiguration?.tag) {
+        SongAudio -> song.createMediaSource(mediaItem)
+        MvBackground -> video.createMediaSource(mediaItem)
+        else -> plain.createMediaSource(mediaItem)
+    }
 }
 
 /** Marks the song's own items for [RoutingSourceFactory]. */
 private object SongAudio
+
+/** Marks music-video background items for [RoutingSourceFactory]. */
+private object MvBackground
 
 /** Where the share video's audio is read from, and which stretches of it. */
 private class ShareAudio(val factory: DataSource.Factory, val uri: Uri, val timeline: ShareTimeline)
@@ -370,6 +451,34 @@ private class ShareAudio(val factory: DataSource.Factory, val uri: Uri, val time
  */
 internal suspend fun resolveSharePreviewAudio(song: Song): Pair<DataSource.Factory, Uri>? =
     shareOpusFor(song)
+
+/** A resolved music-video stream for the share background: its URL, and the headers its fetch has to wear. */
+internal class ShareMusicVideo(val url: String, val headers: Map<String, String>)
+
+/**
+ * The song's music video, resolved the way the player's own video deck
+ * resolves it — [InnerTubeXResolver.extractVideo], the video-only stream at
+ * most [MV_MAX_HEIGHT] tall — for the share video to play under the words.
+ *
+ * A non-YouTube row is matched to its YouTube recording first, exactly as for
+ * the share's audio ([youTubeIdOf]). Asked plainly, then once more as
+ * age-restricted when the plain ask finds nothing, as [MusicVideoEngine]
+ * does. Null when there is no picture worth showing: no match, no video-only
+ * stream, a live window, or a catalogue track whose "video" is its cover held
+ * still (narrower than [MIN_MV_ASPECT], the video deck's own test).
+ */
+internal suspend fun resolveShareMusicVideo(song: Song): ShareMusicVideo? {
+    val id = youTubeIdOf(song) ?: return null
+    return withContext(Dispatchers.IO) {
+        val plain = runCatching { InnerTubeXResolver.extractVideo(id, MV_MAX_HEIGHT) }.getOrNull()
+        val stream = plain ?: runCatching {
+            InnerTubeXResolver.extractVideo(id, MV_MAX_HEIGHT, ageRestricted = true)
+        }.getOrNull()
+        stream
+            ?.takeIf { it.aspect >= MIN_MV_ASPECT }
+            ?.let { ShareMusicVideo(it.url, it.headers) }
+    }
+}
 
 private suspend fun shareOpusFor(song: Song): Pair<DataSource.Factory, Uri>? {
     val id = youTubeIdOf(song) ?: return null
@@ -404,8 +513,15 @@ private val youTubeMatches = ConcurrentHashMap<String, String>()
 
 /** The clip's length, read off a muted player that is released straight after. */
 @androidx.annotation.OptIn(UnstableApi::class)
-private suspend fun probeLengthMs(context: Context, url: String): Long? = withContext(Dispatchers.Main) {
-    val player = ExoPlayer.Builder(context).build()
+private suspend fun probeLengthMs(
+    context: Context,
+    url: String,
+    /** How the probe reads [url]; a music video's URL needs its minted headers, a plain player would be refused. */
+    sourceFactory: MediaSource.Factory? = null,
+): Long? = withContext(Dispatchers.Main) {
+    val builder = ExoPlayer.Builder(context)
+    if (sourceFactory != null) builder.setMediaSourceFactory(sourceFactory)
+    val player = builder.build()
     try {
         withTimeoutOrNull(PROBE_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
@@ -441,6 +557,8 @@ private suspend fun transform(
     totalDurationMs: Long,
     crossfade: Boolean,
     onProgress: (Int) -> Unit = {},
+    /** The music-video background in [video], when the base layer is one: routes its items to their own factory. */
+    musicVideo: ShareMusicVideo? = null,
 ): Boolean {
     val sequences = mutableListOf(video)
     var songFactory: MediaSource.Factory = DefaultMediaSourceFactory(context)
@@ -483,7 +601,11 @@ private suspend fun transform(
                         context,
                         DefaultDecoderFactory.Builder(context).build(),
                         Clock.DEFAULT,
-                        RoutingSourceFactory(DefaultMediaSourceFactory(context), songFactory),
+                        RoutingSourceFactory(
+                            DefaultMediaSourceFactory(context),
+                            songFactory,
+                            musicVideo?.let { mvSourceFactory(it.headers) } ?: DefaultMediaSourceFactory(context),
+                        ),
                         DataSourceBitmapLoader(context),
                     ),
                 )
@@ -618,3 +740,15 @@ private const val DIM = 0.6f
 
 /** Comfortably past what Instagram re-encodes a 1080p story to. */
 private const val VIDEO_BITRATE = 10_000_000
+
+/** The music video is a background under type, not the feature: 720p is plenty and halves the fetch. */
+private const val MV_MAX_HEIGHT = 720
+
+/** Narrower than this is a cover held still, not a picture worth showing — the video deck's own test. */
+private const val MIN_MV_ASPECT = 1.2f
+
+/** The music video at 55%: bright scenes stay behind the words, dark ones still read as video. */
+private const val MV_DIM = 0.55f
+
+/** Bounded ranges for the music-video fetch, the same as the video deck's — see ChunkedDataSource. */
+private const val MV_CHUNK_BYTES = 1L * 1024 * 1024

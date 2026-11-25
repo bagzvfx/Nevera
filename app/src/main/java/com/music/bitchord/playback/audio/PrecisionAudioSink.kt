@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import com.music.bitchord.BuildConfig
 import com.music.bitchord.playback.AudioOutputStatus
+import com.music.bitchord.playback.NeveraAudioBus
 import com.music.bitchord.playback.loopmix.LoopMixPort
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -502,6 +503,10 @@ class PrecisionAudioSink(
         val processed = processedEndUs
         if (processed != C.TIME_UNSET) {
             dspChain.transition.leadUs = (processed - position).coerceAtLeast(0L)
+            // Feed the measured sink lead to the glow/waveform timing policy —
+            // this is the exact amount of processed audio queued ahead of the
+            // speaker, which dominates the visual-vs-bass delay.
+            NeveraAudioBus.dspLeadMs.value = dspChain.transition.leadUs / 1000
         }
         val port = loop
         if (port.outArm != null || port.inArm != null) {
@@ -658,6 +663,7 @@ class PrecisionAudioSink(
     override fun flush() {
         processedEndUs = C.TIME_UNSET
         dspChain.transition.leadUs = 0L
+        NeveraAudioBus.dspLeadMs.value = null
         loopInterrupted()
         streaming = false
         outputByteBuffer.clear()
@@ -676,6 +682,7 @@ class PrecisionAudioSink(
     override fun reset() {
         processedEndUs = C.TIME_UNSET
         dspChain.transition.leadUs = 0L
+        NeveraAudioBus.dspLeadMs.value = null
         loopInterrupted()
         streaming = false
         processCounter = 0L

@@ -117,17 +117,14 @@ object NeveraVocalMotion {
                 val rawT = ((positionMs - word.startMs) / heldMs).coerceIn(0f, 1f)
                 // Gentle organic ease-in-out proportional to vocal hold length
                 val sustainBlend = ((heldMs - 340f) / 680f).coerceIn(0.08f, 0.34f)
-                val smoothT = rawT * rawT * (3f - 2f * rawT)
-                val easedT = rawT * (1f - sustainBlend) + smoothT * sustainBlend
-                return start + easedT * word.text.length
+                return start + legatoEase(rawT, sustainBlend) * word.text.length
             }
             val next = line.words.getOrNull(index + 1)
             if (next != null && positionMs < next.startMs) {
                 val gapStart = line.text.indexOf(next.text, end).takeIf { it >= 0 } ?: end
                 val pause = (next.startMs - word.endMs).coerceAtLeast(1L)
                 val through = ((positionMs - word.endMs).toFloat() / pause).coerceIn(0f, 1f)
-                val easedGap = through * through * (3f - 2f * through)
-                return end + easedGap * (gapStart - end)
+                return end + legatoEase(through, GAP_EASE_BLEND) * (gapStart - end)
             }
             offset = end
         }
@@ -196,6 +193,62 @@ object NeveraVocalMotion {
 
         val amplitude = 0.68f + sustain * 0.62f + if (isBestPart) 0.28f else 0f
         return (crest * amplitude * envelope).coerceIn(0f, 1.65f)
+    }
+
+    /**
+     * Linear motion softened by a smoothstep: [blend] of the ease, the rest
+     * straight through.
+     *
+     * A full smoothstep has zero slope at both ends. Within a word that is a
+     * gentle settle, but across an inter-word pause it made the sweep stall
+     * on the last letter, creep across the gap, then lurch into the next
+     * word — a surge at every word boundary instead of one glide. Blending
+     * keeps the ends moving at (1 − blend) of full pace, so the leading edge
+     * never actually stops between words.
+     */
+    fun legatoEase(t: Float, blend: Float): Float {
+        val x = t.coerceIn(0f, 1f)
+        val b = blend.coerceIn(0f, 1f)
+        val smooth = x * x * (3f - 2f * x)
+        return x * (1f - b) + smooth * b
+    }
+
+    /** How much of the inter-word gap's ease is smoothstep; see [legatoEase]. */
+    private const val GAP_EASE_BLEND = 0.45f
+
+    /**
+     * Alpha multipliers for a glow mask window across a span, as (offset,
+     * multiplier) gradient stops: 0 at both ends, 1 across the middle,
+     * ramping over [featherFraction] of the span at each end.
+     *
+     * A glow masked by a plain rectangle keeps the rectangle's hard edges —
+     * the blur laid over it can only soften them by its own radius, and the
+     * halo reads as blocks of light behind the letters (the "pixelated"
+     * glow). Every glow mask in the player is feathered with this window
+     * before it is blurred, so the mask itself is already a gradient and no
+     * rectangular step survives for the blur to show.
+     */
+    fun glowWindowStops(featherFraction: Float): List<Pair<Float, Float>> {
+        val f = featherFraction.coerceIn(0f, 0.5f)
+        return when {
+            f <= 0.001f -> listOf(0f to 1f, 1f to 1f)
+            f >= 0.499f -> listOf(0f to 0f, 0.5f to 1f, 1f to 0f)
+            else -> listOf(0f to 0f, f to 1f, 1f - f to 1f, 1f to 0f)
+        }
+    }
+
+    /**
+     * Alpha multipliers for a glow that is lit from its start and fades out
+     * over the last [featherFraction] of its span — the leading edge of the
+     * best-part aura, which follows the sweep and must not end on a cut.
+     */
+    fun glowLeadStops(featherFraction: Float): List<Pair<Float, Float>> {
+        val f = featherFraction.coerceIn(0f, 1f)
+        return when {
+            f <= 0.001f -> listOf(0f to 1f, 1f to 1f)
+            f >= 0.999f -> listOf(0f to 1f, 1f to 0f)
+            else -> listOf(0f to 1f, 1f - f to 1f, 1f to 0f)
+        }
     }
 
     /** True for Arabic / joined cursive scripts where per-glyph slicing would break ligatures. */

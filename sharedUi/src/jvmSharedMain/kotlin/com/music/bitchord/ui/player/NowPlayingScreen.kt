@@ -381,9 +381,12 @@ private fun AudioReactiveBassTrebleGlow(
                 val tBeat = if (isPlaying) NeveraAudioBus.beatHit.value else 0f
                 val tReff = if (isPlaying && NeveraAudioBus.isBestPartActive.value) 1f else 0f
 
-                // Tight zero-delay kick lock (~14ms instant rise), velvety ambient tail (~175ms)
-                val riseK = 1f - kotlin.math.exp((-dt / 0.014f).toDouble()).toFloat()
-                val fallK = 1f - kotlin.math.exp((-dt / 0.175f).toDouble()).toFloat()
+                // Tight kick lock (~10ms rise). The fall is kept short (~120ms):
+                // the native analyzer already applies its own release smoothing,
+                // and stacking a second long release on top smears each beat's
+                // peak hundreds of ms past the kick the listener hears.
+                val riseK = 1f - kotlin.math.exp((-dt / 0.010f).toDouble()).toFloat()
+                val fallK = 1f - kotlin.math.exp((-dt / 0.120f).toDouble()).toFloat()
                 val reffK = 1f - kotlin.math.exp((-dt / 0.50f).toDouble()).toFloat()
                 val toneK = 1f - kotlin.math.exp((-dt / 0.65f).toDouble()).toFloat()
 

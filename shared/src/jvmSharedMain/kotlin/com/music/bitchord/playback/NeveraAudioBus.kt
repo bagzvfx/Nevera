@@ -56,8 +56,48 @@ object NeveraAudioBus {
      * delays, so no single fixed value can line the glow up on every route. The
      * mastering DSP delays publication of the analyzed bands by this much so
      * pulses land when the sound is actually heard.
+     *
+     * This is only the *static* estimate. The mastering processor resolves the
+     * value it actually uses per block through [GlowLatencyPolicy], preferring
+     * the measured values below whenever they exist — the route table alone
+     * was the previous fix, and it was not enough, because the dominant term
+     * is not the output route at all: it is how much audio the sink is
+     * holding in flight ahead of the speaker (see [dspLeadMs]).
      */
     val glowLatencyCompensationMs = MutableStateFlow(65L)
+
+    /**
+     * Measured in-flight lead of the DSP chain over the audible position, in
+     * milliseconds: (media the chain has processed) − (media the listener has
+     * heard), i.e. exactly the delay between the PCM the analyzer sees and
+     * the sound leaving the device. Published by the sink layer, which
+     * already computes this figure for its transition filters
+     * (`PrecisionAudioSink.getCurrentPositionUs` → `leadUs`). Null until the
+     * sink reports it; [GlowLatencyPolicy] then falls back gracefully.
+     */
+    val dspLeadMs = MutableStateFlow<Long?>(null)
+
+    /**
+     * Duration of the active AudioTrack's own buffer, in milliseconds,
+     * derived by AudioOutputStatus from the track's reported buffer size,
+     * sample rate and encoding. This is the part of the sink lead that can
+     * be known without the sink's position clock: Media3 sizes this buffer
+     * generously (on float routes, where the AudioTrack applies playback
+     * speed itself, it is sized for 8x speed and can hold seconds of audio),
+     * and the renderer keeps it close to full, so its duration tracks the
+     * real lead far better than any per-route constant. Null until the
+     * first AudioTrack is initialized.
+     */
+    val trackBufferMs = MutableStateFlow<Long?>(null)
+
+    /**
+     * The post-sink tail of the active route, in milliseconds: HAL/DAC,
+     * HDMI, or Bluetooth codec + air time that happens *after* audio leaves
+     * the AudioTrack buffer. Written by AudioOutputStatus alongside
+     * [glowLatencyCompensationMs]; [GlowLatencyPolicy] adds it on top of a
+     * measured sink lead instead of conflating the two.
+     */
+    val glowRouteTailMs = MutableStateFlow(20L)
 
     /** Automatically displays Romaji when Japanese script (Hiragana/Katakana) is detected. */
     val autoJapaneseRomaji = MutableStateFlow(true)
@@ -117,4 +157,82 @@ object NeveraAudioBus {
             secondaryText = secondary,
         )
     }
+}
+
+/**
+ * Pure resolution of the glow/waveform latency compensation, in milliseconds.
+ *
+ * The delay that has to be compensated is the time between the PCM the
+ * analyzer sees and the same samples leaving the device. That has two parts:
+ *
+ *  1. the **sink lead** — audio the DSP chain has already processed that is
+ *     still queued inside the sink / AudioTrack, inaudible for now. This is
+ *     by far the larger and more variable term (hundreds of ms on a normal
+ *     route; seconds on a float route, whose AudioTrack buffer is sized for
+ *     8x playback speed), and it is why a per-route constant table could
+ *     never line the glow up: it modelled only part 2.
+ *  2. the **route tail** — HAL/DAC/Bluetooth codec + air time after the
+ *     AudioTrack buffer.
+ *
+ * Preference order: the sink's own measured lead ([measuredLeadMs]) when it
+ * is being published, then the AudioTrack buffer duration
+ * ([trackBufferMs]) as a measured stand-in for the sink lead, then the
+ * legacy per-route total ([legacyTotalMs]) as the last resort.
+ */
+object GlowLatencyPolicy {
+
+    /** Hard ceiling: float-route sink leads can legitimately reach seconds. */
+    const val MAX_COMPENSATION_MS = 4_000L
+
+    fun resolveCompensationMs(
+        measuredLeadMs: Long?,
+        trackBufferMs: Long?,
+        routeTailMs: Long,
+        legacyTotalMs: Long,
+    ): Long {
+        val resolved = when {
+            measuredLeadMs != null -> measuredLeadMs + routeTailMs
+            trackBufferMs != null -> trackBufferMs + routeTailMs
+            else -> legacyTotalMs
+        }
+        return resolved.coerceIn(0L, MAX_COMPENSATION_MS)
+    }
+
+    /**
+     * Duration, in milliseconds, of an AudioTrack buffer of [bufferSizeBytes]
+     * at [sampleRateHz] with [bytesPerSample] per sample and [channelCount]
+     * channels. Null when any input is unusable (unknown size/rate/format).
+     */
+    fun trackBufferDurationMs(
+        bufferSizeBytes: Int,
+        sampleRateHz: Int,
+        bytesPerSample: Int,
+        channelCount: Int,
+    ): Long? {
+        if (bufferSizeBytes <= 0 || sampleRateHz <= 0 || bytesPerSample <= 0 || channelCount <= 0) {
+            return null
+        }
+        val bytesPerFrame = bytesPerSample.toLong() * channelCount.toLong()
+        val frames = bufferSizeBytes.toLong() / bytesPerFrame
+        if (frames <= 0L) return null
+        return frames * 1_000L / sampleRateHz.toLong()
+    }
+
+    /** Bytes per sample for the PCM encodings the player publishes. */
+    fun bytesPerSampleForEncoding(encoding: Int): Int = when (encoding) {
+        // android.media.AudioFormat values, duplicated as constants so this
+        // policy stays platform-free and JVM-testable in :shared.
+        ENCODING_PCM_16BIT -> 2
+        ENCODING_PCM_8BIT -> 1
+        ENCODING_PCM_24BIT_PACKED -> 3
+        ENCODING_PCM_32BIT -> 4
+        ENCODING_PCM_FLOAT -> 4
+        else -> 2
+    }
+
+    private const val ENCODING_PCM_16BIT = 2
+    private const val ENCODING_PCM_8BIT = 3
+    private const val ENCODING_PCM_24BIT_PACKED = 21
+    private const val ENCODING_PCM_32BIT = 22
+    private const val ENCODING_PCM_FLOAT = 4
 }

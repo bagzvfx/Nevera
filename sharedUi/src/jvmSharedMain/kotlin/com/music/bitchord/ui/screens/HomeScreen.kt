@@ -75,6 +75,7 @@ import com.music.bitchord.data.model.UiState
 import java.util.Locale
 import com.music.bitchord.data.model.artworkAt
 import com.music.bitchord.ui.components.MessageState
+import com.music.bitchord.ui.components.rememberListArtwork
 import com.music.bitchord.ui.components.PAGE_GUTTER
 import com.music.bitchord.ui.components.RowMoreButton
 import com.music.bitchord.ui.components.PullToRefresh
@@ -319,13 +320,25 @@ private fun RecentShelf(
     Column(Modifier.padding(bottom = 26.dp)) {
         RecentSectionHeader(title = localizeShelfTitle(shelf.title), subtitle = localizeShelfSubtitle(shelf.subtitle))
         val isCurrentItem = shelf.items.playingItemMatcher(currentSong)
+        // Chunked once per item list, not once per recomposition: this shelf
+        // recomposes on every play/pause change, and re-slicing the list each
+        // time also handed the row a new item identity to diff against.
+        val columns = remember(shelf.items) { shelf.items.chunked(RECENT_TRACKS_PER_COLUMN) }
         BoxWithConstraints {
             val columnWidth = trackColumnWidth(maxWidth)
             ShelfRow(
                 contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(shelf.items.chunked(RECENT_TRACKS_PER_COLUMN)) { column ->
+                items(
+                    count = columns.size,
+                    key = { index ->
+                        val first = columns[index].firstOrNull()
+                        "recent-col:${first?.videoId ?: first?.title ?: "empty"}:$index"
+                    },
+                    contentType = { "recent-column" },
+                ) { columnIndex ->
+                    val column = columns[columnIndex]
                     Column(Modifier.width(columnWidth)) {
                         column.forEach { item ->
                             RecentTrackRow(
@@ -416,7 +429,7 @@ fun CompactTrackRow(
     ) {
         Box(Modifier.trackArtSize(48.dp, isVideo)) {
             AsyncImage(
-                model = thumbnailUrl.artworkAt(ROW_ART_PX),
+                model = rememberListArtwork(thumbnailUrl.artworkAt(ROW_ART_PX), ROW_ART_PX),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -750,12 +763,23 @@ internal fun Shelf(
     Column(Modifier.padding(bottom = 26.dp)) {
         SectionHeader(shelf.title, shelf.subtitle)
         val isCurrentItem = shelf.items.playingItemMatcher(currentSong)
+        // Keyed like the Library's rows (see shelfCardKeys), so a feed page
+        // that inserts or reorders cards moves the composed ones instead of
+        // throwing them away and rebuilding the row from the top; the content
+        // type lets the row reuse a card's slot for another card rather than
+        // for whatever happened to leave the screen.
+        val cardKeys = remember(shelf.items) { shelfCardKeys(shelf.items) }
         ShelfRow(
             contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             leadingCard?.let { card -> item(key = "leading") { card() } }
-            items(shelf.items) { item ->
+            items(
+                count = shelf.items.size,
+                key = { cardKeys[it] },
+                contentType = { if (shelf.layout == ShelfLayout.VIDEO) "video-card" else "card" },
+            ) { index ->
+                val item = shelf.items[index]
                 if (shelf.layout == ShelfLayout.VIDEO) {
                     VideoShelfCard(
                         item = item,
@@ -811,8 +835,10 @@ fun VideoShelfCard(
         ) {
             AsyncImage(
                 // Video stills are not resizable googleusercontent art; the
-                // largest the row listed is already about card size.
-                model = item.thumbnailUrl,
+                // largest the row listed is already about card size. The
+                // request still names a decode size, so a full-resolution
+                // still is never decoded whole for a card a third its width.
+                model = rememberListArtwork(item.thumbnailUrl, VIDEO_ART_PX),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
@@ -839,6 +865,9 @@ fun VideoShelfCard(
 
 /** A music video's frame, or a square one when the listener asked for that — see [VideoThumbnails]. */
 val VIDEO_ASPECT: Float get() = if (VideoThumbnails.square) 1f else 16f / 9f
+
+/** Decode size for a video card's still: the card is 248dp wide, so this covers a 3x screen. */
+private const val VIDEO_ART_PX = 720
 
 /** Wide enough that a 16:9 card stands about as tall as a square [SHELF_CARD_WIDTH] one. */
 val VIDEO_CARD_WIDTH: Dp get() = if (VideoThumbnails.square) SHELF_CARD_WIDTH else 248.dp
@@ -1006,7 +1035,7 @@ internal fun ShelfCard(
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                 ) {
                     AsyncImage(
-                        model = item.thumbnailUrl.artworkAt(CARD_ART_PX),
+                        model = rememberListArtwork(item.thumbnailUrl.artworkAt(CARD_ART_PX), CARD_ART_PX),
                         contentDescription = null,
                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),

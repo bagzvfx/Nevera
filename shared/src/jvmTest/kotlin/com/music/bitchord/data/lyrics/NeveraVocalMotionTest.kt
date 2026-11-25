@@ -34,6 +34,86 @@ class NeveraVocalMotionTest {
     }
 
     @Test
+    fun `sweep keeps moving through an inter-word pause`() {
+        // Provider timings with a real pause between words: the old gap ease
+        // was a full smoothstep, whose slope is zero at both ends, so the
+        // sweep stalled on the last letter and lurched into the next word.
+        val line = LyricLine(
+            timeMs = 0L,
+            text = "aa   bb",
+            words = listOf(
+                LyricWord(startMs = 0L, endMs = 500L, text = "aa"),
+                LyricWord(startMs = 800L, endMs = 1_300L, text = "bb"),
+            ),
+        )
+        val gapAdvanceStart = NeveraVocalMotion.smartRevealedChars(line, 530L) -
+            NeveraVocalMotion.smartRevealedChars(line, 500L)
+        val gapAdvanceEnd = NeveraVocalMotion.smartRevealedChars(line, 800L) -
+            NeveraVocalMotion.smartRevealedChars(line, 770L)
+        assertTrue(gapAdvanceStart >= 0.15f, "sweep stalls entering the pause: $gapAdvanceStart chars in 30 ms")
+        assertTrue(gapAdvanceEnd >= 0.15f, "sweep stalls leaving the pause: $gapAdvanceEnd chars in 30 ms")
+    }
+
+    @Test
+    fun `legato ease reaches its ends and never stalls at them`() {
+        assertEquals(0f, NeveraVocalMotion.legatoEase(0f, 0.45f))
+        assertEquals(1f, NeveraVocalMotion.legatoEase(1f, 0.45f))
+        assertEquals(0f, NeveraVocalMotion.legatoEase(-1f, 0.45f))
+        assertEquals(1f, NeveraVocalMotion.legatoEase(2f, 0.45f))
+        // A full smoothstep covers only ~0.7% of the span in its first 5%;
+        // the blend must keep the ends clearly moving.
+        assertTrue(NeveraVocalMotion.legatoEase(0.05f, 0.45f) >= 0.02f)
+        assertTrue(NeveraVocalMotion.legatoEase(0.95f, 0.45f) <= 0.98f)
+        var previous = -1f
+        var t = 0f
+        while (t <= 1.001f) {
+            val eased = NeveraVocalMotion.legatoEase(t, 0.45f)
+            assertTrue(eased >= previous, "legato ease moved backwards at $t")
+            previous = eased
+            t += 0.05f
+        }
+    }
+
+    @Test
+    fun `glow window stops are sorted symmetric and clamped`() {
+        for (fraction in listOf(0f, 0.1f, 0.25f, 0.5f, 0.9f, 2f)) {
+            val stops = NeveraVocalMotion.glowWindowStops(fraction)
+            assertEquals(0f, stops.first().first)
+            assertEquals(1f, stops.last().first)
+            assertEquals(1f, stops.maxOf { it.second })
+            for (i in stops.indices) {
+                assertTrue(stops[i].second in 0f..1f, "multiplier out of range at $fraction")
+                if (i > 0) assertTrue(stops[i].first > stops[i - 1].first, "stops not sorted at $fraction")
+                val mirror = stops[stops.lastIndex - i]
+                assertEquals(stops[i].second, mirror.second, "window not symmetric at $fraction")
+                assertEquals(stops[i].first, 1f - mirror.first, "window not symmetric at $fraction")
+            }
+            if (fraction > 0.001f) {
+                assertEquals(0f, stops.first().second, "window must fade in from nothing")
+                assertEquals(0f, stops.last().second, "window must fade out to nothing")
+            }
+        }
+    }
+
+    @Test
+    fun `glow lead stops are lit from the start and fade only at the end`() {
+        for (fraction in listOf(0.1f, 0.4f, 1f, 3f)) {
+            val stops = NeveraVocalMotion.glowLeadStops(fraction)
+            assertEquals(0f, stops.first().first)
+            assertEquals(1f, stops.last().first)
+            assertEquals(1f, stops.first().second, "lead glow starts lit")
+            assertEquals(0f, stops.last().second, "lead glow ends faded")
+            for (i in 1 until stops.size) {
+                assertTrue(stops[i].first > stops[i - 1].first, "stops not sorted at $fraction")
+                assertTrue(stops[i].second <= stops[i - 1].second, "lead glow brightens mid-span at $fraction")
+            }
+        }
+        // No feather requested: fully lit across the whole span.
+        assertTrue(NeveraVocalMotion.glowLeadStops(0f).all { it.second == 1f })
+        assertTrue(NeveraVocalMotion.glowWindowStops(0f).all { it.second == 1f })
+    }
+
+    @Test
     fun `revealed chars move monotonically through a synthesized line`() {
         val line = NeveraVocalMotion.ensureKaraokeTiming(
             LyricLine(timeMs = 0L, text = "shine on through the night"),

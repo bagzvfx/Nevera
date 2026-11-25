@@ -326,7 +326,7 @@ class FloatingLyricsOverlayService : Service() {
 
             // Smooth bass energy for spirit particles & Reff breathing
             val targetBass = if (snapshot.isPlaying) NeveraAudioBus.bassEnergy.value else 0f
-            val bassK = 1f - exp((-dtSec / if (targetBass > smoothBass) 0.04f else 0.18f).toDouble()).toFloat()
+            val bassK = 1f - exp((-dtSec / if (targetBass > smoothBass) 0.04f else 0.12f).toDouble()).toFloat()
             smoothBass += (targetBass - smoothBass) * bassK
             if (snapshot.isPlaying) {
                 spiritTimeSec += dtSec * (1f + smoothBass * 0.65f)

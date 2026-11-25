@@ -130,6 +130,14 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
     float bassAcc = 0.0f;
     float trebleAcc = 0.0f;
     float fullAcc = 0.0f;
+    // Sub-window (~10 ms) peak tracking for onset detection: a kick that lands
+    // inside a long block must not be averaged away by the block RMS.
+    float bassSubAcc = 0.0f;
+    float trebleSubAcc = 0.0f;
+    float bassPeakRms = 0.0f;
+    float treblePeakRms = 0.0f;
+    int subCount = 0;
+    const int subWindow = 480;
     const float invCh = 1.0f / static_cast<float>(channelCount);
 
     for (int f = 0; f < frameCount; ++f) {
@@ -209,6 +217,7 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
             gState.lp1 += gState.lpAlpha * (mono - gState.lp1);
             gState.lp2 += gState.lpAlpha * (gState.lp1 - gState.lp2);
             bassAcc += gState.lp2 * gState.lp2;
+            bassSubAcc += gState.lp2 * gState.lp2;
 
             // 2-pole cascaded HP (>3.2 kHz) isolates hi-hats, snare snap & vocal air
             const float hp1 = gState.hpAlpha * (gState.hp1PrevOut + mono - gState.hp1PrevIn);
@@ -218,6 +227,13 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
             gState.hp2PrevIn = hp1;
             gState.hp2PrevOut = hp2;
             trebleAcc += hp2 * hp2;
+            trebleSubAcc += hp2 * hp2;
+            if (++subCount >= subWindow) {
+                const float invSub = 1.0f / static_cast<float>(subCount);
+                bassPeakRms = std::max(bassPeakRms, std::sqrt(bassSubAcc * invSub));
+                treblePeakRms = std::max(treblePeakRms, std::sqrt(trebleSubAcc * invSub));
+                bassSubAcc = 0.0f; trebleSubAcc = 0.0f; subCount = 0;
+            }
         }
     }
 
@@ -238,8 +254,15 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
         gState.slowTreble += (trebleRms - gState.slowTreble) * slowAlpha;
 
         // Spectral-flux transient onset: spikes sharply when kick/hi-hat hits above local baseline!
-        const float bassFlux = std::max(0.0f, bassRms - gState.slowBass * 0.92f);
-        const float trebleFlux = std::max(0.0f, trebleRms - gState.slowTreble * 0.90f);
+        if (subCount > 0) {
+            const float invSub = 1.0f / static_cast<float>(subCount);
+            bassPeakRms = std::max(bassPeakRms, std::sqrt(bassSubAcc * invSub));
+            treblePeakRms = std::max(treblePeakRms, std::sqrt(trebleSubAcc * invSub));
+        }
+        const float bassOnsetRms = std::max(bassRms, bassPeakRms);
+        const float trebleOnsetRms = std::max(trebleRms, treblePeakRms);
+        const float bassFlux = std::max(0.0f, bassOnsetRms - gState.slowBass * 0.92f);
+        const float trebleFlux = std::max(0.0f, trebleOnsetRms - gState.slowTreble * 0.90f);
 
         const float bassOnset = std::clamp(bassFlux * 9.5f, 0.0f, 1.0f);
         const float trebleOnset = std::clamp(trebleFlux * 16.0f, 0.0f, 1.0f);
@@ -252,13 +275,20 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
         const float targetBass = std::clamp(bassLevel * 0.35f + bassOnset * 0.85f, 0.0f, 1.0f);
         const float targetTreble = std::clamp(trebleLevel * 0.30f + trebleOnset * 0.88f, 0.0f, 1.0f);
 
-        // Instant kick lock on attack, velvety musical decay
+        // Time-based smoothing: coefficients derive from the actual block
+        // duration, so attack/release time constants stay constant in seconds
+        // no matter what block size the pipeline hands us (the old fixed
+        // per-block coefficients made the release ~340 ms at 85 ms blocks and
+        // smeared every beat). Bass release is 120 ms; attack is ~8 ms.
+        const float keepAttack = std::exp(-blockSec / 0.008f);
+        const float keepBassRelease = std::exp(-blockSec / 0.120f);
+        const float keepTrebleRelease = std::exp(-blockSec / 0.100f);
         gState.smoothBass = (targetBass > gState.smoothBass)
-            ? (gState.smoothBass * 0.06f + targetBass * 0.94f)
-            : (gState.smoothBass * 0.78f + targetBass * 0.22f);
+            ? targetBass + (gState.smoothBass - targetBass) * keepAttack
+            : targetBass + (gState.smoothBass - targetBass) * keepBassRelease;
         gState.smoothTreble = (targetTreble > gState.smoothTreble)
-            ? (gState.smoothTreble * 0.12f + targetTreble * 0.88f)
-            : (gState.smoothTreble * 0.76f + targetTreble * 0.24f);
+            ? targetTreble + (gState.smoothTreble - targetTreble) * keepAttack
+            : targetTreble + (gState.smoothTreble - targetTreble) * keepTrebleRelease;
 
         const float targetSustain = std::clamp(fullRms * 3.2f, 0.0f, 1.0f);
         gState.sustainEnergy += (targetSustain - gState.sustainEnergy) * sustainAlpha;
@@ -266,7 +296,7 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
         const float rawBeat = std::clamp(bassOnset * 0.75f + trebleOnset * 0.35f, 0.0f, 1.0f);
         gState.smoothBeat = (rawBeat > gState.smoothBeat)
             ? rawBeat
-            : (gState.smoothBeat * 0.72f);
+            : rawBeat + (gState.smoothBeat - rawBeat) * std::exp(-blockSec / 0.160f);
 
         const jsize outLen = env->GetArrayLength(jOutBands);
         if (outLen >= 4) {

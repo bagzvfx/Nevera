@@ -404,6 +404,21 @@ object AudioOutputStatus {
             bufferSize = bufferSize ?: current.value.bufferSize,
             floatFallback = current.value.requestedPcmMode == OutputPcmMode.FLOAT_32 && !isFloat,
         )
+        // The AudioTrack buffer's duration is a measured stand-in for the
+        // sink lead the glow compensation has to cover (see
+        // NeveraAudioBus.trackBufferMs): Media3 sizes this buffer, the
+        // renderer keeps it close to full, and on float routes it can hold
+        // seconds — dwarfing every per-route constant. Stereo is assumed:
+        // the player is a music player and publishAudioTrack's caller does
+        // not forward a channel count.
+        if (bufferSize != null) {
+            NeveraAudioBus.trackBufferMs.value = GlowLatencyPolicy.trackBufferDurationMs(
+                bufferSizeBytes = bufferSize,
+                sampleRateHz = sampleRateHz,
+                bytesPerSample = GlowLatencyPolicy.bytesPerSampleForEncoding(encoding),
+                channelCount = 2,
+            )
+        }
         val evaluated = evaluateActualPath(baseSnapshot)
         current.value = evaluated
         updateGlowLatency(evaluated)
@@ -414,14 +429,32 @@ object AudioOutputStatus {
      * of the route [snapshot] describes, by writing
      * [NeveraAudioBus.glowLatencyCompensationMs] (same package, :shared module).
      *
-     * A single fixed compensation cannot be right for every route — that is
-     * why the glow kept drifting out of sync with the bass whenever the output
-     * changed. Classic Bluetooth (A2DP) is by far the slowest route; LE Audio
-     * roughly halves it. Called from every publishing site that assigns a new
-     * snapshot through [evaluateActualPath], plus [reset].
+     * Two values are published, because the compensation has two independent
+     * parts (see [GlowLatencyPolicy] in :shared):
+     *  - [NeveraAudioBus.glowRouteTailMs]: what happens *after* the
+     *    AudioTrack buffer on this route (HAL/DAC, HDMI, Bluetooth codec).
+     *  - [NeveraAudioBus.glowLatencyCompensationMs]: the resolved static
+     *    estimate, combining any measured sink lead / track buffer known so
+     *    far with that tail, falling back to the legacy per-route totals.
+     *
+     * The mastering processor re-resolves per block, so fresher measurements
+     * (a newly initialized AudioTrack, the sink's live lead) take effect
+     * without waiting for the next route snapshot. Classic Bluetooth (A2DP)
+     * is by far the slowest tail; LE Audio roughly halves it. Called from
+     * every publishing site that assigns a new snapshot through
+     * [evaluateActualPath], plus [reset].
      */
     internal fun updateGlowLatency(snapshot: Snapshot) {
-        NeveraAudioBus.glowLatencyCompensationMs.value = when (snapshot.routeKind) {
+        val tailMs = when (snapshot.routeKind) {
+            AudioRouting.Kind.PHONE -> 20L
+            AudioRouting.Kind.WIRED -> 12L
+            AudioRouting.Kind.USB -> 12L
+            AudioRouting.Kind.HDMI -> 45L
+            AudioRouting.Kind.BLUETOOTH ->
+                if (snapshot.bluetoothProfile == "LE Audio") 55L else 140L
+            AudioRouting.Kind.OTHER -> 20L
+        }
+        val legacyTotalMs = when (snapshot.routeKind) {
             AudioRouting.Kind.PHONE -> 65L
             AudioRouting.Kind.WIRED -> 45L
             AudioRouting.Kind.USB -> 35L
@@ -430,6 +463,13 @@ object AudioOutputStatus {
                 if (snapshot.bluetoothProfile == "LE Audio") 110L else 210L
             AudioRouting.Kind.OTHER -> 65L
         }
+        NeveraAudioBus.glowRouteTailMs.value = tailMs
+        NeveraAudioBus.glowLatencyCompensationMs.value = GlowLatencyPolicy.resolveCompensationMs(
+            measuredLeadMs = NeveraAudioBus.dspLeadMs.value,
+            trackBufferMs = NeveraAudioBus.trackBufferMs.value,
+            routeTailMs = tailMs,
+            legacyTotalMs = legacyTotalMs,
+        )
     }
 
     /**
@@ -605,6 +645,10 @@ object AudioOutputStatus {
 
     fun reset() {
         current.value = Snapshot()
+        // Measured glow-latency inputs belong to the torn-down pipeline; a
+        // stale sink lead or track buffer must not outlive it.
+        NeveraAudioBus.dspLeadMs.value = null
+        NeveraAudioBus.trackBufferMs.value = null
         updateGlowLatency(current.value)
     }
 

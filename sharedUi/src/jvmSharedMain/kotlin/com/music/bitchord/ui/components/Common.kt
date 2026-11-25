@@ -97,6 +97,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
+import coil3.request.ImageRequest
+import coil3.size.Precision
 import com.music.bitchord.data.model.ROW_ART_PX
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.isMatchPending
@@ -254,6 +257,36 @@ fun libraryGrid(available: Dp): LibraryGridSpec {
     val columns = raw.coerceIn(LIBRARY_GRID_MIN_COLUMNS, LIBRARY_GRID_MAX_COLUMNS)
     val cardWidth = (available - LIBRARY_GRID_SPACING * (columns - 1)) / columns
     return LibraryGridSpec(columns, cardWidth)
+}
+
+/**
+ * The Coil request behind a list thumbnail, built once per URL rather than
+ * left to the image loader's defaults.
+ *
+ * Two defaults cost frames in a scrolling list. The singleton loader fades
+ * every cover in over 200ms (see BitChordApplication), so a fast scroll is a
+ * stream of alpha animations layered over the rows it is trying to draw; a
+ * row's thumbnail has no fade. And with a bare URL the decode size is
+ * whatever the layout pass reports, which differs between call sites for the
+ * same cover and so splits the memory cache; naming [px] — the same value
+ * the URL itself is sized to, see `artworkAt` — gives every row of a kind one
+ * decode size and one cache entry. INEXACT lets the decoder stop at the
+ * nearest sampled size at or above the target instead of paying for an
+ * exact-scale pass the row's crop would discard anyway.
+ */
+@Composable
+fun rememberListArtwork(url: String?, px: Int): ImageRequest? {
+    val context = LocalPlatformContext.current
+    return remember(context, url, px) {
+        url?.let {
+            ImageRequest.Builder(context)
+                .data(it)
+                .size(px, px)
+                .precision(Precision.INEXACT)
+                .crossfade(false)
+                .build()
+        }
+    }
 }
 
 /**
@@ -552,7 +585,10 @@ private fun SongRowContent(
         } else {
             Box(Modifier.trackArtSize(52.dp, song.isVideo)) {
                 AsyncImage(
-                    model = com.music.bitchord.ui.player.rememberRemoteArtworkUrl(song)?.artworkAt(ROW_ART_PX),
+                    model = rememberListArtwork(
+                        com.music.bitchord.ui.player.rememberRemoteArtworkUrl(song)?.artworkAt(ROW_ART_PX),
+                        ROW_ART_PX,
+                    ),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier

@@ -79,6 +79,7 @@ import com.music.bitchord.data.model.UiState
 import com.music.bitchord.data.model.SearchHistoryEntity
 import com.music.bitchord.data.model.EntityType
 import com.music.bitchord.ui.components.MessageState
+import com.music.bitchord.ui.components.rememberListArtwork
 import com.music.bitchord.ui.components.PAGE_GUTTER
 import com.music.bitchord.ui.components.RowMoreButton
 import com.music.bitchord.ui.components.ROW_DIVIDER_INSET
@@ -207,6 +208,31 @@ fun SearchScreen(
     // appear as a dropdown beneath the text completions rather than floating
     // after the search has committed.
     val showTypeahead = typeaheadResults.isNotEmpty() && suggesting
+    // The result page's derivations, worked out once per result set rather
+    // than once per recomposition. The list's content is recomposed whenever
+    // anything it captures changes — the playing row's state among them —
+    // and sectioning the results is five filter passes over them, while a
+    // tap searched the track list linearly for the tapped song's place in
+    // the queue it builds. All three are properties of the result set, not
+    // of the frame, so they are remembered against it.
+    val successData = (results as? UiState.Success)?.data
+    val searchTracks = remember(successData) {
+        successData?.mapNotNull { row ->
+            when (row) {
+                is SearchResult.TopTrack -> row.song
+                is SearchResult.Track -> row.song
+                else -> null
+            }
+        } ?: emptyList()
+    }
+    val sections = remember(successData, filter) {
+        successData?.let { searchSections(it, filter) } ?: emptyList()
+    }
+    val searchTrackIndex = remember(searchTracks) {
+        val byId = HashMap<String, Int>()
+        searchTracks.forEachIndexed { index, song -> byId.putIfAbsent(song.videoId, index) }
+        byId
+    }
     LaunchedEffect(listState, results, loadingMore, searchingLibrary, searchingAddons) {
         if (results !is UiState.Success || searchingLibrary || searchingAddons) return@LaunchedEffect
         snapshotFlow {
@@ -348,15 +374,9 @@ fun SearchScreen(
                 results is UiState.Loading -> songListSkeleton(circular = filter == SearchFilter.ARTISTS)
                 results is UiState.Error -> item { MessageState(results.message) }
                 results is UiState.Success -> {
-                    val tracks = results.data
-                        .mapNotNull { row -> when (row) {
-                            is SearchResult.TopTrack -> row.song
-                            is SearchResult.Track -> row.song
-                            is SearchResult.Browse -> null
-                            else -> null
-                        } }
+                    val tracks = searchTracks
                     val isCurrentRow = playingRowMatcher(tracks, currentSong)
-                    val topResult = results.data.filterIsInstance<SearchResult.TopTrack>().firstOrNull()
+                    val topResult = successData?.filterIsInstance<SearchResult.TopTrack>()?.firstOrNull()
                     if (filter == SearchFilter.ALL && topResult != null) {
                         item(key = "search:top-result:${topResult.song.videoId}") {
                             SwipeToQueueBox(
@@ -372,7 +392,7 @@ fun SearchScreen(
                             }
                         }
                     }
-                    searchSections(results.data, filter).forEach { section ->
+                    sections.forEach { section ->
                         section.title?.let { title ->
                             item(key = "search-section:$title") {
                                 Text(
@@ -403,7 +423,7 @@ fun SearchScreen(
                                 is SearchResult.Track -> SongRow(
                                     song = row.song,
                                     onClick = {
-                                        onSongClick(tracks, tracks.indexOf(row.song).coerceAtLeast(0))
+                                        onSongClick(tracks, searchTrackIndex[row.song.videoId] ?: 0)
                                     },
                                     onLongPress = { onSongLongPress(row.song) },
                                     onSwipeToQueue = { onSongSwipe(row.song) },
@@ -794,7 +814,7 @@ private fun TypeaheadSongRow(
         ) {
             Box(Modifier.trackArtSize(52.dp, song.isVideo)) {
                 AsyncImage(
-                    model = song.artworkAt(ROW_ART_PX),
+                    model = rememberListArtwork(song.artworkAt(ROW_ART_PX), ROW_ART_PX),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
@@ -1047,7 +1067,10 @@ private fun RecentSearchEntityRow(
         ) {
             Box(Modifier.size(52.dp)) {
                 AsyncImage(
-                    model = entity.artworkUrl,
+                    // Sized like every other row's art: the saved URL is
+                    // whatever size the result it came from carried, and
+                    // left bare it decoded at that size for a 52dp slot.
+                    model = rememberListArtwork(entity.artworkUrl.artworkAt(ROW_ART_PX), ROW_ART_PX),
                     contentDescription = null,
                     modifier = Modifier
                         .size(52.dp)
@@ -1111,7 +1134,7 @@ private fun BrowseRow(item: BrowseItem, onClick: () -> Unit, onLongPress: (() ->
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AsyncImage(
-            model = item.thumbnailUrl.artworkAt(ROW_ART_PX),
+            model = rememberListArtwork(item.thumbnailUrl.artworkAt(ROW_ART_PX), ROW_ART_PX),
             contentDescription = null,
             modifier = Modifier
                 .size(52.dp)

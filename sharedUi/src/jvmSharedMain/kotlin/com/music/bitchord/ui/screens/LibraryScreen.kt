@@ -205,7 +205,9 @@ fun LibraryScreen(
                     shelves.forEach { shelf ->
                         item(key = "shelf:${shelf.title}") {
                             if (shelf.title == PLAYLISTS) {
-                                val pinnedFirst = shelf.pinnedFirst(pinnedPlaylists)
+                                val pinnedFirst = remember(shelf, pinnedPlaylists) {
+                                    shelf.pinnedFirst(pinnedPlaylists)
+                                }
                                 PlaylistShelf(
                                     shelf = pinnedFirst,
                                     onItemClick = onShelfItemClick,
@@ -438,7 +440,16 @@ fun LibraryGridPage(
     // Pinning wins over the default order, but an explicit sort is a stronger,
     // more deliberate signal than a pin and is left to reorder the whole grid,
     // pinned cards included.
-    val sortedShelf = shelf.pinnedFirst(pinnedPlaylists).sortedForLibrary(librarySort)
+    // Remembered: this page recomposes whenever a pin or the sort changes —
+    // which is exactly the interaction the sort answers — and re-running the
+    // pin pass and the sort on every one of those frames re-ordered a list
+    // the grid was in the middle of laying out with the old one.
+    val sortedShelf = remember(shelf, pinnedPlaylists, librarySort) {
+        shelf.pinnedFirst(pinnedPlaylists).sortedForLibrary(librarySort)
+    }
+    // The rows' key scheme, not `browseId ?: title`: two cards can share
+    // either, and a lazy grid throws on a key it has seen twice.
+    val cardKeys = remember(sortedShelf.items) { shelfCardKeys(sortedShelf.items) }
     BoxWithConstraints(modifier.fillMaxSize()) {
         val grid = libraryGrid(maxWidth - PAGE_GUTTER * 2)
         LazyVerticalGrid(
@@ -460,7 +471,12 @@ fun LibraryGridPage(
                     )
                 }
             }
-            items(sortedShelf.items, key = { it.browseId ?: it.title }) { item ->
+            items(
+                count = sortedShelf.items.size,
+                key = { cardKeys[it] },
+                contentType = { "card" },
+            ) { index ->
+                val item = sortedShelf.items[index]
                 ShelfCard(
                     item = item,
                     onClick = { onItemClick(item) },
