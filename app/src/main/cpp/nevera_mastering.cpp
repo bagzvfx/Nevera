@@ -13,11 +13,17 @@ namespace {
 //  - Subtle musical mastering contour (warm sub-bass punch ~90Hz + vocal air ~3.8kHz).
 //  - Dual-stage fast-attack/smooth-release true-peak limiter + analog soft-knee saturator.
 //
-// Rhythm Analysis Stage (outputs [bassPulse, treblePulse, sustainEnergy, beatHit]):
+// Rhythm Analysis Stage (outputs [bassPulse, treblePulse, sustainEnergy,
+// beatHit, peakOffsetFraction]):
 //  - 2-pole cascaded Low-Pass (<150 Hz) for punchy kick/bass isolation.
 //  - 2-pole cascaded High-Pass (>3.2 kHz) for hi-hat/snare/vocal shimmer isolation.
 //  - Adaptive spectral-flux onset detector (instant RMS vs slow rolling average)
 //    so the UI glow hits tightly on actual musical beats rather than drifting flat.
+//  - peakOffsetFraction [0..1] is where inside this block the loudest ~10 ms
+//    sub-window sits, so the Kotlin frame clock can stamp an onset frame at
+//    the transient itself instead of the block middle (which could be tens
+//    of ms away from the kick). Only written when the caller's array holds
+//    5+ floats; older 4-float callers are unaffected.
 struct NeveraMasteringState {
     int sampleRate = 0;
 
@@ -131,13 +137,31 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
     float trebleAcc = 0.0f;
     float fullAcc = 0.0f;
     // Sub-window (~10 ms) peak tracking for onset detection: a kick that lands
-    // inside a long block must not be averaged away by the block RMS.
+    // inside a long block must not be averaged away by the block RMS. The
+    // loudest sub-window's center frame is also remembered so the caller can
+    // locate the transient inside the block (peakOffsetFraction output).
     float bassSubAcc = 0.0f;
     float trebleSubAcc = 0.0f;
     float bassPeakRms = 0.0f;
     float treblePeakRms = 0.0f;
+    float peakSubPower = -1.0f;
+    int peakSubCenterFrame = -1;
     int subCount = 0;
-    const int subWindow = 480;
+    const int subWindow = (sampleRate / 100 > 0) ? (sampleRate / 100) : 480;
+    // Closes the current sub-window: folds it into the peak RMS figures and,
+    // if it is the loudest so far, records where it sits in the block.
+    auto closeSubWindow = [&](int centerFrame) {
+        if (subCount <= 0) return;
+        const float invSub = 1.0f / static_cast<float>(subCount);
+        bassPeakRms = std::max(bassPeakRms, std::sqrt(bassSubAcc * invSub));
+        treblePeakRms = std::max(treblePeakRms, std::sqrt(trebleSubAcc * invSub));
+        const float power = (bassSubAcc + trebleSubAcc) * invSub;
+        if (power > peakSubPower) {
+            peakSubPower = power;
+            peakSubCenterFrame = centerFrame;
+        }
+        bassSubAcc = 0.0f; trebleSubAcc = 0.0f; subCount = 0;
+    };
     const float invCh = 1.0f / static_cast<float>(channelCount);
 
     for (int f = 0; f < frameCount; ++f) {
@@ -229,10 +253,8 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
             trebleAcc += hp2 * hp2;
             trebleSubAcc += hp2 * hp2;
             if (++subCount >= subWindow) {
-                const float invSub = 1.0f / static_cast<float>(subCount);
-                bassPeakRms = std::max(bassPeakRms, std::sqrt(bassSubAcc * invSub));
-                treblePeakRms = std::max(treblePeakRms, std::sqrt(trebleSubAcc * invSub));
-                bassSubAcc = 0.0f; trebleSubAcc = 0.0f; subCount = 0;
+                // This window spans frames [f - subCount + 1, f].
+                closeSubWindow(f - subCount / 2);
             }
         }
     }
@@ -255,10 +277,12 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
 
         // Spectral-flux transient onset: spikes sharply when kick/hi-hat hits above local baseline!
         if (subCount > 0) {
-            const float invSub = 1.0f / static_cast<float>(subCount);
-            bassPeakRms = std::max(bassPeakRms, std::sqrt(bassSubAcc * invSub));
-            treblePeakRms = std::max(treblePeakRms, std::sqrt(trebleSubAcc * invSub));
+            // Final partial window spans [frameCount - subCount, frameCount - 1].
+            closeSubWindow((frameCount - subCount + frameCount - 1) / 2);
         }
+        const float peakOffsetFraction = (peakSubCenterFrame >= 0)
+            ? std::clamp(static_cast<float>(peakSubCenterFrame) / static_cast<float>(frameCount), 0.0f, 1.0f)
+            : 0.5f;
         const float bassOnsetRms = std::max(bassRms, bassPeakRms);
         const float trebleOnsetRms = std::max(trebleRms, treblePeakRms);
         const float bassFlux = std::max(0.0f, bassOnsetRms - gState.slowBass * 0.92f);
@@ -299,7 +323,16 @@ Java_com_music_bitchord_playback_audio_NeveraMasteringProcessor_nativeProcess(
             : rawBeat + (gState.smoothBeat - rawBeat) * std::exp(-blockSec / 0.160f);
 
         const jsize outLen = env->GetArrayLength(jOutBands);
-        if (outLen >= 4) {
+        if (outLen >= 5) {
+            jfloat out[5] = {
+                gState.smoothBass,
+                gState.smoothTreble,
+                gState.sustainEnergy,
+                gState.smoothBeat,
+                peakOffsetFraction,
+            };
+            env->SetFloatArrayRegion(jOutBands, 0, 5, out);
+        } else if (outLen >= 4) {
             jfloat out[4] = {
                 gState.smoothBass,
                 gState.smoothTreble,

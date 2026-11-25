@@ -106,6 +106,52 @@ class GlowFrameClockTest {
     }
 
     @Test
+    fun `fraction zero stamps the block start and fraction one the block end`() {
+        val comp = 200 * ms
+        val atStart = GlowFrameClock().readyTimeNsAtFraction(0L, 80 * ms, 0f, 1_000 * ms, comp)
+        assertEquals(1_000 * ms + comp, atStart)
+        val atEnd = GlowFrameClock().readyTimeNsAtFraction(0L, 80 * ms, 1f, 1_000 * ms, comp)
+        assertEquals(1_000 * ms + comp + 80 * ms, atEnd)
+        // Fraction 0.5 is exactly the legacy middle stamp.
+        val atMid = GlowFrameClock().readyTimeNsAtFraction(0L, 80 * ms, 0.5f, 1_000 * ms, comp)
+        assertEquals(1_000 * ms + comp + 40 * ms, atMid)
+    }
+
+    @Test
+    fun `peak offset moves an onset stamp off the block middle to the transient`() {
+        val clock = GlowFrameClock()
+        val comp = 200 * ms
+        // Kick lands in the first ~10ms sub-window of an 85ms block: the
+        // middle stamp would fire ~37ms after the transient is heard.
+        // 0.06 × 85ms = 5.1ms; 0.94 × 85ms = 79.9ms (ns-exact expectations).
+        val ready = clock.readyTimeNsAtFraction(0L, 85 * ms, 0.06f, 1_000 * ms, comp)
+        assertEquals(1_000 * ms + comp + 5_100_000L, ready)
+        // A late transient stamps late by the same logic.
+        val clock2 = GlowFrameClock()
+        val readyLate = clock2.readyTimeNsAtFraction(0L, 85 * ms, 0.94f, 1_000 * ms, comp)
+        assertEquals(1_000 * ms + comp + 79_899_999L, readyLate)
+    }
+
+    @Test
+    fun `peak stamped burst keeps media spacing between onsets`() {
+        val clock = GlowFrameClock()
+        val arrival = 1_000 * ms
+        val comp = 200 * ms
+        val r0 = clock.readyTimeNsAtFraction(0L, 80 * ms, 0.25f, arrival, comp)
+        val r1 = clock.readyTimeNsAtFraction(80 * ms, 160 * ms, 0.25f, arrival, comp)
+        assertEquals(80 * ms, r1 - r0)
+    }
+
+    @Test
+    fun `out of range fractions are clamped to the block span`() {
+        val comp = 100 * ms
+        val under = GlowFrameClock().readyTimeNsAtFraction(0L, 80 * ms, -0.5f, 0L, comp)
+        assertEquals(comp, under)
+        val over = GlowFrameClock().readyTimeNsAtFraction(0L, 80 * ms, 1.5f, 0L, comp)
+        assertEquals(comp + 80 * ms, over)
+    }
+
+    @Test
     fun `reset makes the next block a fresh anchor`() {
         val clock = GlowFrameClock()
         clock.readyTimeNs(0L, 40 * ms, 0L, 100 * ms)

@@ -20,6 +20,24 @@ class GlowLatencyPolicyTest {
     }
 
     @Test
+    fun `measured lead already includes the track buffer and is never double counted`() {
+        // dspLeadMs is (processed media − heard media) at the sink: the
+        // AudioTrack buffer's contents are part of it by construction.
+        // Adding trackBufferMs on top in this branch would double-count the
+        // buffer and push the glow late by its whole duration — with a huge
+        // buffer value present, the result must still be lead + tail only.
+        assertEquals(
+            355L,
+            GlowLatencyPolicy.resolveCompensationMs(
+                measuredLeadMs = 300L,
+                trackBufferMs = 900L,
+                routeTailMs = 55L,
+                legacyTotalMs = 210L,
+            ),
+        )
+    }
+
+    @Test
     fun `track buffer is the stand-in when no live lead is published`() {
         assertEquals(
             270L,

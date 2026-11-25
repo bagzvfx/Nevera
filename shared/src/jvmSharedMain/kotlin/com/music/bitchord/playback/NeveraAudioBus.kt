@@ -39,6 +39,16 @@ object NeveraAudioBus {
     /** Sharp transient kick/snare beat impulse [0f..1f]. */
     val beatHit = MutableStateFlow(0f)
 
+    /**
+     * Composite full-rhythm energy [0f..1f] — see [RhythmComposite]. Drives
+     * the player's waveform ribbon so the ribbon follows the song's whole
+     * rhythm (busy treble / sustained passages move it too), not bass alone.
+     * Published in the same media-scheduled frame as the four bands it is
+     * composed from, so it inherits exactly the glow's compensated timing —
+     * there is no separate, uncompensated waveform path.
+     */
+    val rhythmEnergy = MutableStateFlow(0f)
+
     /** True while the current track is inside its Reff / Best Part climax window. */
     val isBestPartActive = MutableStateFlow(false)
 
@@ -125,11 +135,13 @@ object NeveraAudioBus {
         treble: Float,
         sustain: Float = 0f,
         beat: Float = 0f,
+        rhythm: Float = RhythmComposite.of(bass, treble, sustain, beat),
     ) {
         bassEnergy.value = bass.coerceIn(0f, 1f)
         trebleEnergy.value = treble.coerceIn(0f, 1f)
         sustainEnergy.value = sustain.coerceIn(0f, 1f)
         beatHit.value = beat.coerceIn(0f, 1f)
+        rhythmEnergy.value = rhythm.coerceIn(0f, 1f)
     }
 
     fun clearAudioBands() {
@@ -137,6 +149,7 @@ object NeveraAudioBus {
         trebleEnergy.value = 0f
         sustainEnergy.value = 0f
         beatHit.value = 0f
+        rhythmEnergy.value = 0f
     }
 
     fun publishOverlaySnapshot(snapshot: OverlayLyricSnapshot) {
@@ -156,6 +169,44 @@ object NeveraAudioBus {
             primaryText = primary,
             secondaryText = secondary,
         )
+    }
+}
+
+/**
+ * The composite "whole rhythm" signal the waveform ribbon renders.
+ *
+ * A bass-only waveform goes flat through passages that are rhythmically
+ * busy but bass-light — string ostinatos, hi-hat patterns, vocal chops,
+ * sustained choruses. The composite therefore mixes all four analyzer
+ * outputs, with weights chosen for what each contributes to perceived
+ * rhythm:
+ *
+ *  - **sustain 0.35** — the body: full-band sustained energy keeps the
+ *    ribbon alive and breathing through any busy passage.
+ *  - **bass 0.30** — the depth: kick/bass pulse gives the ribbon its
+ *    low-end weight and most of its beat alignment.
+ *  - **beat 0.20** — the spikes: the transient onset impulse sharpens
+ *    individual hits on top of the body.
+ *  - **treble 0.15** — the shimmer: hats/snare/vocal air add fine motion
+ *    so treble-driven rhythms still register.
+ *
+ * Weights sum to 1.0 and the result is clamped to [0f..1f]. Pure and
+ * JVM-testable; the mastering processor computes it per analyzed frame
+ * and publishes it through the same compensated schedule as the bands.
+ */
+object RhythmComposite {
+
+    const val SUSTAIN_WEIGHT = 0.35f
+    const val BASS_WEIGHT = 0.30f
+    const val BEAT_WEIGHT = 0.20f
+    const val TREBLE_WEIGHT = 0.15f
+
+    fun of(bass: Float, treble: Float, sustain: Float, beat: Float): Float {
+        val mixed = sustain.coerceIn(0f, 1f) * SUSTAIN_WEIGHT +
+            bass.coerceIn(0f, 1f) * BASS_WEIGHT +
+            beat.coerceIn(0f, 1f) * BEAT_WEIGHT +
+            treble.coerceIn(0f, 1f) * TREBLE_WEIGHT
+        return mixed.coerceIn(0f, 1f)
     }
 }
 

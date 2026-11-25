@@ -126,6 +126,34 @@ internal class NeveraSharePlaqueRenderer(
         textAlign = Paint.Align.CENTER
     }
 
+    // Constant-radius blur filters, built once: several scenes used to
+    // allocate a fresh BlurMaskFilter on every frame (a native object per
+    // frame is exactly the churn that made the sheet's preview judder).
+    private val blur14 = BlurMaskFilter(14f, BlurMaskFilter.Blur.NORMAL)
+    private val blur22 = BlurMaskFilter(22f, BlurMaskFilter.Blur.NORMAL)
+    private val blur24 = BlurMaskFilter(24f, BlurMaskFilter.Blur.NORMAL)
+    private val blur26 = BlurMaskFilter(26f, BlurMaskFilter.Blur.NORMAL)
+
+    /**
+     * The plaque scenes' backdrop vignette, cached by frame size: it is a
+     * full-screen gradient that never changes while the size doesn't, and it
+     * was being rebuilt on every drawn frame.
+     */
+    private var vignetteShader: RadialGradient? = null
+    private var vignetteW = 0f
+    private var vignetteH = 0f
+
+    private fun vignette(w: Float, h: Float): RadialGradient {
+        val cached = vignetteShader
+        if (cached != null && vignetteW == w && vignetteH == h) return cached
+        return RadialGradient(
+            w * 0.5f, h * 0.48f, w * 0.85f,
+            intArrayOf(Color.argb(65, 16, 12, 16), Color.argb(195, 7, 7, 9)),
+            floatArrayOf(0f, 1f),
+            Shader.TileMode.CLAMP,
+        ).also { vignetteShader = it; vignetteW = w; vignetteH = h }
+    }
+
     // 36 deterministic 3D snow/dust/ash depth flakes
     private data class Flake(
         val depth: Int,
@@ -199,12 +227,7 @@ internal class NeveraSharePlaqueRenderer(
         // Standard 3D Plaque Scenes (3D Vinyl, 3D Holo CD, 3D Glass, 3D Poster)
         if (!transparentBackdrop) {
             canvas.drawBitmap(baseBackdrop, 0f, 0f, bitmapPaint)
-            paint.shader = RadialGradient(
-                w * 0.5f, h * 0.48f, w * 0.85f,
-                intArrayOf(Color.argb(65, 16, 12, 16), Color.argb(195, 7, 7, 9)),
-                floatArrayOf(0f, 1f),
-                Shader.TileMode.CLAMP,
-            )
+            paint.shader = vignette(w, h)
             canvas.drawRect(0f, 0f, w, h, paint)
             paint.shader = null
         }
@@ -353,7 +376,7 @@ internal class NeveraSharePlaqueRenderer(
         glowPaint.style = Paint.Style.STROKE
         glowPaint.strokeWidth = 8f
         glowPaint.color = Color.argb(215, 148, 192, 255)
-        glowPaint.maskFilter = BlurMaskFilter(22f, BlurMaskFilter.Blur.NORMAL)
+        glowPaint.maskFilter = blur22
         canvas.drawArc(
             RectF(cx - outerRx, deckTopY + deckH - outerRy, cx + outerRx, deckTopY + deckH + outerRy),
             6f, 168f, false, glowPaint,
@@ -393,7 +416,7 @@ internal class NeveraSharePlaqueRenderer(
         glowPaint.style = Paint.Style.STROKE
         glowPaint.strokeWidth = 14f + bassPulse * 4f
         glowPaint.color = Color.argb(225, 155, 198, 255)
-        glowPaint.maskFilter = BlurMaskFilter(24f, BlurMaskFilter.Blur.NORMAL)
+        glowPaint.maskFilter = blur24
         canvas.drawOval(ringRect, glowPaint)
         strokePaint.color = Color.WHITE
         strokePaint.strokeWidth = 10f
@@ -680,7 +703,7 @@ internal class NeveraSharePlaqueRenderer(
         paint.shader = null
         glowPaint.style = Paint.Style.FILL
         glowPaint.color = Color.argb(235, 224, 206, 255)
-        glowPaint.maskFilter = BlurMaskFilter(26f, BlurMaskFilter.Blur.NORMAL)
+        glowPaint.maskFilter = blur26
         canvas.drawOval(px - lampW * 0.36f, py - lampH * 0.46f, px + lampW * 0.36f, py - lampH * 0.32f, glowPaint)
         paint.color = Color.WHITE
         canvas.drawOval(px - lampW * 0.32f, py - lampH * 0.44f, px + lampW * 0.32f, py - lampH * 0.34f, paint)
@@ -906,7 +929,7 @@ internal class NeveraSharePlaqueRenderer(
                             glowPaint.shader = null
                             glowPaint.color = glowColor
                             glowPaint.alpha = (165 * focus * alpha).roundToInt()
-                            glowPaint.maskFilter = BlurMaskFilter(14f, BlurMaskFilter.Blur.NORMAL)
+                            glowPaint.maskFilter = blur14
                             canvas.drawText(rowText, startX, y, glowPaint)
                         }
                         canvas.drawText(rowText, startX, y, scriptPaint)

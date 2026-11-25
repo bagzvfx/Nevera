@@ -494,6 +494,24 @@ object AppSettings {
      */
     val onboardingComplete = MutableStateFlow(false)
 
+    /**
+     * How the listener asked to be addressed on the welcome pages: a title
+     * ("Miss" / "Mr.") and the call name after it — together, the greeting
+     * name ("Miss Ayu"). Chosen once at onboarding, kept here rather than
+     * with Listen Together's party nickname, which is a name for other
+     * people; this one is the app talking to its owner.
+     */
+    val userTitle = MutableStateFlow("Mr.")
+    val userCallName = MutableStateFlow("")
+
+    /** "Miss Ayu" — or just the name, or blank when neither was given. */
+    val greetingName: String
+        get() = listOf(userTitle.value, userCallName.value)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .takeIf { userCallName.value.isNotBlank() }
+            .orEmpty()
+
     /** Requests a sustained high-refresh UI. Off keeps Android's automatic policy. */
     val highPerformanceMode = MutableStateFlow(false)
 
@@ -1137,6 +1155,8 @@ object AppSettings {
         showListenTogetherButton.value = prefs.getBoolean(KEY_LISTEN_TOGETHER_BUTTON, false)
         reduceAnimation.value = prefs.getBoolean(KEY_REDUCE_ANIMATION, false)
         onboardingComplete.value = prefs.getBoolean(KEY_ONBOARDING_COMPLETE, false)
+        userTitle.value = prefs.getString(KEY_USER_TITLE, "Mr.") ?: "Mr."
+        userCallName.value = prefs.getString(KEY_USER_CALL_NAME, "") ?: ""
         highPerformanceMode.value = prefs.getBoolean(KEY_HIGH_PERFORMANCE_MODE, false)
         performanceRefreshRate.value = normalizePerformanceRefreshRate(
             prefs.getInt(KEY_PERFORMANCE_REFRESH_RATE, DEFAULT_PERFORMANCE_REFRESH_RATE),
@@ -1591,6 +1611,16 @@ object AppSettings {
     fun setOnboardingComplete() {
         onboardingComplete.value = true
         prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETE, true).apply()
+    }
+
+    /** The welcome pages' answer: how to address the listener, and their call name. */
+    fun setUserCallName(title: String, name: String) {
+        userTitle.value = title
+        userCallName.value = name.trim()
+        prefs.edit()
+            .putString(KEY_USER_TITLE, title)
+            .putString(KEY_USER_CALL_NAME, name.trim())
+            .apply()
     }
 
     fun setStopOnTaskRemoved(value: Boolean) {
@@ -2485,6 +2515,8 @@ object AppSettings {
     private const val KEY_CACHE_LIMIT = "audio_cache_limit_bytes"
     private const val KEY_REDUCE_ANIMATION = "reduce_animation"
     private const val KEY_ONBOARDING_COMPLETE = "onboarding_complete"
+    private const val KEY_USER_TITLE = "user_title"
+    private const val KEY_USER_CALL_NAME = "user_call_name"
     private const val KEY_HIGH_PERFORMANCE_MODE = "high_performance_mode"
     private const val KEY_PERFORMANCE_REFRESH_RATE = "performance_refresh_rate"
     private const val KEY_STOP_ON_TASK_REMOVED = "stop_on_task_removed"

@@ -456,6 +456,20 @@ internal suspend fun resolveSharePreviewAudio(song: Song): Pair<DataSource.Facto
 internal class ShareMusicVideo(val url: String, val headers: Map<String, String>)
 
 /**
+ * A YouTube video's poster frame, for the share card to sit on when the
+ * video itself is the background of a still share (and for the sheet's
+ * preview, which shows the poster rather than running a second decoder).
+ * The largest frame YouTube keeps; some videos only have the smaller one,
+ * so callers fall back to [shareVideoPosterFallbackUrl] when this 404s.
+ */
+internal fun shareVideoPosterUrl(videoId: String): String =
+    "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
+
+/** The poster size every YouTube video has — see [shareVideoPosterUrl]. */
+internal fun shareVideoPosterFallbackUrl(videoId: String): String =
+    "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+
+/**
  * The song's music video, resolved the way the player's own video deck
  * resolves it — [InnerTubeXResolver.extractVideo], the video-only stream at
  * most [MV_MAX_HEIGHT] tall — for the share video to play under the words.
@@ -463,7 +477,10 @@ internal class ShareMusicVideo(val url: String, val headers: Map<String, String>
  * A non-YouTube row is matched to its YouTube recording first, exactly as for
  * the share's audio ([youTubeIdOf]). Asked plainly, then once more as
  * age-restricted when the plain ask finds nothing, as [MusicVideoEngine]
- * does. Null when there is no picture worth showing: no match, no video-only
+ * does. This is the FALLBACK path: when the video deck is playing this
+ * song's video, the sheet uses the deck's own stream instead
+ * ([MusicVideoEngine.playingStreamFor]) — the actual video on screen, not a
+ * re-match. Null when there is no picture worth showing: no match, no video-only
  * stream, a live window, or a catalogue track whose "video" is its cover held
  * still (narrower than [MIN_MV_ASPECT], the video deck's own test).
  */

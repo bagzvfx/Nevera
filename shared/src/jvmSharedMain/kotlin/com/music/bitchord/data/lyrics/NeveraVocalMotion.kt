@@ -2,6 +2,7 @@ package com.music.bitchord.data.lyrics
 
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.sin
 
 /**
@@ -250,6 +251,74 @@ object NeveraVocalMotion {
             else -> listOf(0f to 1f, 1f - f to 1f, 1f to 0f)
         }
     }
+
+    /**
+     * How brightly one letter radiates at the sweep's current position — the
+     * per-glyph glow model. Every letter of the line being sung carries its
+     * own halo, so the light must be a property of the letter, not of a mask
+     * laid over the line: the earlier word/row window masks, however
+     * feathered, still moved as blocks of light behind the words.
+     *
+     * A continuous function of [revealedChars] (the fractional sweep head,
+     * from [smartRevealedChars]) and of the letter's own state, so the
+     * radiance travels letter by letter with no steps:
+     *
+     * - **Attack**: the letter lights as the sweep crosses it — a smoothstep
+     *   beginning [GLYPH_GLOW_ATTACK_LEAD] letters ahead of its centre and
+     *   completing just past it, so the peak lands on the crossing.
+     * - **Trail**: once crossed, the sweep's contribution decays
+     *   exponentially with the letters left behind it, down to a low ember
+     *   ([GLYPH_GLOW_TRAIL_FLOOR]) that lasts while the line is active.
+     * - **Hold**: a letter of a word being carried ([holdEnvelope], from
+     *   [vocalHoldEnvelope]) burns at up to full brightness for as long as
+     *   the note is held — but only once the sweep has reached it; a held
+     *   note never lights a letter the singer hasn't got to.
+     * - **Letter bloom**: a growing word's per-letter swell ([letterBloom],
+     *   from [GrowingWord.sampleInto]) can light its letters directly.
+     *
+     * [glyphCenter] is the letter's fractional index (its index + 0.5).
+     * [beatBoost] is the live bass energy, admitted only on a best part,
+     * where the whole line already pulses with the music.
+     */
+    fun glyphGlowBrightness(
+        glyphCenter: Float,
+        revealedChars: Float,
+        holdEnvelope: Float,
+        letterBloom: Float = 0f,
+        beatBoost: Float = 0f,
+        isBestPart: Boolean = false,
+    ): Float {
+        val attackT = ((revealedChars - (glyphCenter - GLYPH_GLOW_ATTACK_LEAD)) /
+            GLYPH_GLOW_ATTACK_SPAN).coerceIn(0f, 1f)
+        if (attackT <= 0f && letterBloom <= 0f) return 0f
+        val attack = attackT * attackT * (3f - 2f * attackT)
+        val behind = (revealedChars - glyphCenter).coerceAtLeast(0f)
+        val trail = exp(-behind * GLYPH_GLOW_TRAIL_DECAY)
+        val sweep = attack * (GLYPH_GLOW_TRAIL_FLOOR + (1f - GLYPH_GLOW_TRAIL_FLOOR) * trail)
+        val sweepWeight = if (isBestPart) GLYPH_GLOW_SWEEP_WEIGHT_BEST else GLYPH_GLOW_SWEEP_WEIGHT
+        var brightness = maxOf(
+            sweep * sweepWeight,
+            attack * holdEnvelope.coerceIn(0f, 1f),
+        )
+        if (isBestPart) brightness += attack * beatBoost.coerceIn(0f, 1f) * 0.18f
+        brightness = maxOf(brightness, letterBloom.coerceIn(0f, 1f) * 0.95f)
+        return brightness.coerceIn(0f, 1f)
+    }
+
+    /** How far ahead of a letter's centre its glow attack begins, in letters. */
+    private const val GLYPH_GLOW_ATTACK_LEAD = 1.1f
+
+    /** How many letters the glow attack spans, from first light to full. */
+    private const val GLYPH_GLOW_ATTACK_SPAN = 1.5f
+
+    /** Exponential fall of the sweep's light per letter left behind the head. */
+    private const val GLYPH_GLOW_TRAIL_DECAY = 0.42f
+
+    /** The ember a sung letter keeps while its line is still the active one. */
+    private const val GLYPH_GLOW_TRAIL_FLOOR = 0.16f
+
+    private const val GLYPH_GLOW_SWEEP_WEIGHT = 0.78f
+    private const val GLYPH_GLOW_SWEEP_WEIGHT_BEST = 0.95f
 
     /** True for Arabic / joined cursive scripts where per-glyph slicing would break ligatures. */
     fun hasJoinedScript(text: String): Boolean = text.any { ch ->

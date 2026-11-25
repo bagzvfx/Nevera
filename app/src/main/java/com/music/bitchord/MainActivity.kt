@@ -849,6 +849,9 @@ private fun BitChordApp(
     val onboardingShown = remember { MutableTransitionState(!onboardingComplete) }
     onboardingShown.targetState = !onboardingComplete
     val onboardingVisible = onboardingShown.currentState || onboardingShown.targetState
+    // Bumped by the welcome's finish, as it slides away: Home's header and
+    // first shelves plop in once. Never bumped for anyone past onboarding.
+    var homePlopTrigger by remember { mutableIntStateOf(0) }
 
     // ---- Navigation ----
     // One back stack for every page: the routes pushed over the tabs, and the
@@ -2350,6 +2353,41 @@ private fun BitChordApp(
     } else {
         Manifest.permission.READ_EXTERNAL_STORAGE
     }
+    // ---- .nevera playlist export ----
+    // The playlist whose export is waiting on the save picker: the picker is
+    // a round trip through another process, and the menu that asked is gone
+    // by the time it answers, so what was asked for is held here.
+    var pendingExportPlaylist by remember {
+        mutableStateOf<com.music.bitchord.data.spotify.LocalPlaylist?>(null)
+    }
+    val exportPlaylistLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(
+            com.music.bitchord.data.playlist.NeveraPlaylistFile.MIME_TYPE,
+        ),
+    ) { uri ->
+        val playlist = pendingExportPlaylist
+        pendingExportPlaylist = null
+        if (uri != null && playlist != null) {
+            scope.launch {
+                com.music.bitchord.data.playlist.NeveraPlaylistFile
+                    .writeTo(context, uri, playlist)
+                    .onSuccess {
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.export_nevera_done),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                    .onFailure {
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.export_nevera_failed),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+            }
+        }
+    }
     // The Search tab's Library source reads the Local Music folder, so it asks
     // for the same permission opening that folder does.
     val onSearchSourceChange: (SearchSource) -> Unit = { source ->
@@ -3673,6 +3711,7 @@ private fun BitChordApp(
                                 // Nothing on Home is seen while the greeting covers it.
                                 artworkMotion = artworkMotion,
                                 replayYear = replayYearBadge,
+                                plopTrigger = homePlopTrigger,
                                 onTopPickLongPress = { pick ->
                                     pick.browseId?.let { browseId ->
                                         onShelfLongPress(
@@ -5590,6 +5629,16 @@ private fun BitChordApp(
                             browseActions = null
                         }
                     },
+                onExport = importEditable?.let { p ->
+                    {
+                        browseActions = null
+                        pendingExportPlaylist = p
+                        exportPlaylistLauncher.launch(
+                            com.music.bitchord.data.playlist.NeveraPlaylistFile
+                                .suggestedFileName(p.title),
+                        )
+                    }
+                },
                 isPinned = pinnableId != null && pinnableId in pinnedPlaylists,
                 onTogglePin = pinnableId?.let { id ->
                     {
@@ -5746,11 +5795,24 @@ private fun BitChordApp(
             OnboardingScreen(
                 signedIn = signedIn,
                 initialName = remember {
-                    ListenTogether.nickname().ifBlank { account?.name.orEmpty() }
+                    AppSettings.userCallName.value.ifBlank {
+                        ListenTogether.nickname().ifBlank { account?.name.orEmpty() }
+                    }
                 },
-                onNameChosen = ListenTogether::setNickname,
+                initialTitle = remember { AppSettings.userTitle.value },
+                onCallNameChosen = { title, name ->
+                    AppSettings.setUserCallName(title, name)
+                    // The party name follows the greeting name, as it did when
+                    // the welcome asked for a name and nothing else.
+                    ListenTogether.setNickname(
+                        listOf(title, name).filter { it.isNotBlank() }.joinToString(" "),
+                    )
+                },
                 onSignIn = { webSession = WebSessionMode.SIGN_IN },
-                onFinish = AppSettings::setOnboardingComplete,
+                onFinish = {
+                    AppSettings.setOnboardingComplete()
+                    homePlopTrigger++
+                },
             )
         }
 

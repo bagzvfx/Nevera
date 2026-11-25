@@ -2,6 +2,7 @@ package com.music.bitchord.playback.audio
 
 import com.music.bitchord.playback.GlowLatencyPolicy
 import com.music.bitchord.playback.NeveraAudioBus
+import com.music.bitchord.playback.RhythmComposite
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.sqrt
@@ -40,7 +41,11 @@ class NeveraMasteringProcessor {
 
     private var sampleRate: Int = 0
     private var channelCount: Int = 0
-    private val bandScratch = FloatArray(4)
+
+    // [bass, treble, sustain, beat, peakOffsetFraction]. The 5th slot is the
+    // native analyzer's report of where the block's loudest ~10 ms sub-window
+    // sits (0..1); older native builds leave it at the 0.5 default below.
+    private val bandScratch = FloatArray(BAND_COUNT) { if (it == BAND_PEAK_OFFSET) 0.5f else 0f }
 
     /** Frames analyzed since the last (re)configure/flush: the media timeline. */
     private var mediaFramesProcessed: Long = 0L
@@ -56,6 +61,7 @@ class NeveraMasteringProcessor {
     private val ringTreble = FloatArray(RING_SIZE)
     private val ringSustain = FloatArray(RING_SIZE)
     private val ringBeat = FloatArray(RING_SIZE)
+    private val ringRhythm = FloatArray(RING_SIZE)
     private var ringHead = 0
     private var ringTail = 0
 
@@ -122,6 +128,7 @@ class NeveraMasteringProcessor {
                 treble = bandScratch[1],
                 sustain = bandScratch[2],
                 beat = bandScratch[3],
+                peakOffsetFraction = bandScratch[BAND_PEAK_OFFSET],
             )
         }
     }
@@ -137,6 +144,7 @@ class NeveraMasteringProcessor {
         treble: Float,
         sustain: Float,
         beat: Float,
+        peakOffsetFraction: Float,
     ) {
         val compensationMs = GlowLatencyPolicy.resolveCompensationMs(
             measuredLeadMs = NeveraAudioBus.dspLeadMs.value,
@@ -144,9 +152,21 @@ class NeveraMasteringProcessor {
             routeTailMs = NeveraAudioBus.glowRouteTailMs.value,
             legacyTotalMs = NeveraAudioBus.glowLatencyCompensationMs.value,
         )
-        val readyNs = frameClock.readyTimeNs(
+        // Onset-bearing frames are stamped where the transient actually sits
+        // inside the block (the native peak sub-window), not at the block
+        // middle: on an 85 ms block the middle can sit ~40 ms away from the
+        // kick, which is precisely the "slightly late" pulse the listener
+        // feels. Quiet/sustained frames keep the middle stamp — there is no
+        // transient to locate, and the smoother path avoids jitter.
+        val stampFraction = if (beat >= ONSET_STAMP_BEAT_MIN) {
+            peakOffsetFraction.coerceIn(0f, 1f)
+        } else {
+            0.5f
+        }
+        val readyNs = frameClock.readyTimeNsAtFraction(
             blockStartMediaNs = blockStartMediaNs,
             blockEndMediaNs = blockEndMediaNs,
+            offsetFraction = stampFraction,
             arrivalWallNs = nowNs,
             compensationNs = compensationMs * NS_PER_MS,
         )
@@ -169,6 +189,9 @@ class NeveraMasteringProcessor {
         ringTreble[ringHead] = treble
         ringSustain[ringHead] = sustain
         ringBeat[ringHead] = beat
+        // The composite travels in the same ring slot, so the waveform is
+        // published on exactly the glow's compensated schedule.
+        ringRhythm[ringHead] = RhythmComposite.of(bass, treble, sustain, beat)
         ringHead = nextHead
 
         // Latest-wins drain: publish the newest frame whose heard-time has
@@ -185,6 +208,7 @@ class NeveraMasteringProcessor {
                 treble = ringTreble[emitIndex],
                 sustain = ringSustain[emitIndex],
                 beat = ringBeat[emitIndex],
+                rhythm = ringRhythm[emitIndex],
             )
         } else if (!nativeLoaded) {
             // Unit-test path: publish immediately without waiting out the compensation delay
@@ -221,6 +245,9 @@ class NeveraMasteringProcessor {
             bandScratch[1] = (rms * 2.2f).coerceIn(0f, 1f)
             bandScratch[2] = (rms * 2.5f).coerceIn(0f, 1f)
             bandScratch[3] = (rms * 2.4f).coerceIn(0f, 1f)
+            // The pure-Kotlin fallback has no sub-window analysis; the block
+            // middle is its honest transient location.
+            bandScratch[BAND_PEAK_OFFSET] = 0.5f
         }
     }
 
@@ -236,6 +263,17 @@ class NeveraMasteringProcessor {
 
     companion object {
         const val MAX_BOOST_DB = 15f
+
+        /** Native output slots: 4 bands + the peak sub-window offset. */
+        private const val BAND_COUNT = 5
+        private const val BAND_PEAK_OFFSET = 4
+
+        /**
+         * Beat strength at/above which a frame counts as onset-bearing and
+         * is stamped at its transient instead of the block middle.
+         */
+        private const val ONSET_STAMP_BEAT_MIN = 0.30f
+
         private const val NS_PER_MS = 1_000_000L
         private const val NS_PER_SECOND = 1_000_000_000L
         private const val RING_SIZE = 1024
@@ -305,6 +343,28 @@ internal class GlowFrameClock {
         blockEndMediaNs: Long,
         arrivalWallNs: Long,
         compensationNs: Long,
+    ): Long = readyTimeNsAtFraction(
+        blockStartMediaNs = blockStartMediaNs,
+        blockEndMediaNs = blockEndMediaNs,
+        offsetFraction = 0.5f,
+        arrivalWallNs = arrivalWallNs,
+        compensationNs = compensationNs,
+    )
+
+    /**
+     * Like [readyTimeNs], but stamps the block at [offsetFraction] of its
+     * span instead of the middle. Onset-bearing frames pass the native
+     * analyzer's peak sub-window position here: the bands still summarize
+     * the whole block, but the *pulse* belongs to the transient, and on a
+     * long block the middle can sit tens of ms away from it — audible as a
+     * glow that pulses just behind the kick.
+     */
+    fun readyTimeNsAtFraction(
+        blockStartMediaNs: Long,
+        blockEndMediaNs: Long,
+        offsetFraction: Float,
+        arrivalWallNs: Long,
+        compensationNs: Long,
     ): Long {
         if (anchorWallNs == Long.MIN_VALUE ||
             blockStartMediaNs < lastBlockEndMediaNs - TOLERANCE_NS
@@ -319,8 +379,10 @@ internal class GlowFrameClock {
             }
         }
         lastBlockEndMediaNs = blockEndMediaNs
-        val midMediaNs = (blockStartMediaNs + blockEndMediaNs) / 2
-        return anchorWallNs + (midMediaNs - anchorMediaNs)
+        val spanNs = (blockEndMediaNs - blockStartMediaNs).coerceAtLeast(0L)
+        val stampMediaNs = blockStartMediaNs +
+            (spanNs.toDouble() * offsetFraction.coerceIn(0f, 1f).toDouble()).toLong()
+        return anchorWallNs + (stampMediaNs - anchorMediaNs)
     }
 
     private fun anchor(arrivalWallNs: Long, compensationNs: Long, blockStartMediaNs: Long) {

@@ -1,5 +1,6 @@
 package com.music.bitchord.ui.screens
 
+import com.music.bitchord.ui.components.plopIn
 import com.music.bitchord.ui.components.trackArtSize
 import com.music.bitchord.ui.components.contextClick
 import com.music.bitchord.ui.AppUi
@@ -156,6 +157,13 @@ fun HomeScreen(
     artworkMotion: Boolean = true,
     /** The Replay year story's button beside the wordmark, or null for none. See [ReplayYearButton]. */
     replayYear: ReplayYearBadge? = null,
+    /**
+     * One-shot entrance: when this becomes a new non-zero value, the header
+     * and the first shelves plop in, staggered — see
+     * [com.music.bitchord.ui.components.plopIn]. Zero (the default, and every
+     * ordinary visit) leaves the feed exactly as it was.
+     */
+    plopTrigger: Int = 0,
 ) {
     // Top Picks' pictures and motion wait for the feed — see LocalArtworkImages.
     val feedReady = state !is UiState.Loading
@@ -188,7 +196,11 @@ fun HomeScreen(
             },
         ) {
             if (title != null) {
-                item { HomeTitle(title, replayYear) }
+                item {
+                    Box(Modifier.plopIn(plopTrigger, index = 0)) {
+                        HomeTitle(title, replayYear)
+                    }
+                }
             }
             if (!signedIn && onSignIn != null) {
                 item {
@@ -204,12 +216,14 @@ fun HomeScreen(
             if (onTopPickClick != null) {
                 when {
                     !topPicks.isNullOrEmpty() -> item(key = "top-picks") {
-                        TopPicksShelf(
-                            picks = topPicks,
-                            listenerName = listenerName,
-                            onClick = onTopPickClick,
-                            onLongPress = onTopPickLongPress,
-                        )
+                        Box(Modifier.plopIn(plopTrigger, index = 1)) {
+                            TopPicksShelf(
+                                picks = topPicks,
+                                listenerName = listenerName,
+                                onClick = onTopPickClick,
+                                onLongPress = onTopPickLongPress,
+                            )
+                        }
                     }
                     topPicks == null && topPicksLoading -> topPicksSkeleton()
                 }
@@ -236,6 +250,7 @@ fun HomeScreen(
                         onItemLongPress = onItemLongPress,
                         currentSong = currentSong,
                         isPlaying = isPlaying,
+                        plopTrigger = plopTrigger,
                     )
                     if (loadingMore) feedMoreSkeleton()
                 }
@@ -275,6 +290,8 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedShelves(
     isPlaying: Boolean,
     onMoodClick: ((TopPickMood, String) -> Unit)? = null,
     onMoodsShowAll: () -> Unit = {},
+    /** First-entrance plop for the lead shelves only; 0 leaves them at rest. */
+    plopTrigger: Int = 0,
 ) {
     shelves.forEachIndexed { index, shelf ->
         // Find Your Mood follows the lead shelf, as on Apple Music's Home.
@@ -283,26 +300,36 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedShelves(
         }
         item(key = shelf.title + index) {
             val openItem: (ShelfItem) -> Unit = { item -> onItemClick(item, shelf.title) }
+            // Only the shelves in the first screenful join the plop; deeper
+            // ones arriving scaled would read as the feed rebuilding itself.
+            val shelfModifier = Modifier.plopIn(
+                trigger = if (index < 4) plopTrigger else 0,
+                index = index + 2,
+            )
             // Listen again and Quick picks are lists on the web player, as
             // Recents is here: one pager for all three.
             if (shelf.layout == ShelfLayout.LIST ||
                 (index == 0 && shelf.title.equals(RECENTS_TITLE, ignoreCase = true))
             ) {
-                RecentShelf(
-                    shelf = shelf,
-                    onItemClick = openItem,
-                    onItemLongPress = onItemLongPress,
-                    currentSong = currentSong,
-                    isPlaying = isPlaying,
-                )
+                Box(shelfModifier) {
+                    RecentShelf(
+                        shelf = shelf,
+                        onItemClick = openItem,
+                        onItemLongPress = onItemLongPress,
+                        currentSong = currentSong,
+                        isPlaying = isPlaying,
+                    )
+                }
             } else {
-                Shelf(
-                    shelf = shelf,
-                    onItemClick = openItem,
-                    onItemLongPress = onItemLongPress,
-                    currentSong = currentSong,
-                    isPlaying = isPlaying,
-                )
+                Box(shelfModifier) {
+                    Shelf(
+                        shelf = shelf,
+                        onItemClick = openItem,
+                        onItemLongPress = onItemLongPress,
+                        currentSong = currentSong,
+                        isPlaying = isPlaying,
+                    )
+                }
             }
         }
     }

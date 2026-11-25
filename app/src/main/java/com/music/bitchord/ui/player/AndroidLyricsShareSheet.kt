@@ -67,10 +67,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.withFrameMillis
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import com.music.bitchord.ui.replay.loadBitmap
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -148,13 +150,42 @@ internal fun AndroidLyricsShareSheet(
     var musicVideoWanted by remember(request) { mutableStateOf(false) }
     var musicVideo by remember(request) { mutableStateOf<ShareMusicVideo?>(null) }
     var mvChecked by remember(request) { mutableStateOf(false) }
+    // The video deck first: when the player is showing THIS song's YouTube
+    // video, the share uses that very video — the deck's own resolved stream
+    // — not a re-match. [deckVideo] is refreshed whenever the deck's shown
+    // video changes while the sheet is open.
+    val deckShownId by MusicVideoEngine.shownVideoId.collectAsStateWithLifecycle()
+    var deckVideo by remember(request) { mutableStateOf<ShareMusicVideo?>(null) }
+    LaunchedEffect(request, deckShownId) {
+        deckVideo = if (request.song.isVideo) {
+            MusicVideoEngine.playingStreamFor(request.song.videoId)
+        } else {
+            null
+        }
+    }
+    // Its poster frame: the preview's background and the still share's,
+    // loaded as a still — no second decoder is ever started for the sheet.
+    var mvPoster by remember(request) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(request, deckVideo) {
+        mvPoster = if (deckVideo != null) {
+            val id = request.song.videoId
+            withContext(Dispatchers.IO) {
+                loadBitmap(context, shareVideoPosterUrl(id))
+                    ?: loadBitmap(context, shareVideoPosterFallbackUrl(id))
+            }
+        } else {
+            null
+        }
+    }
     LaunchedEffect(request, asVideo) {
         if (asVideo && !mvChecked) {
             musicVideo = runCatching { resolveShareMusicVideo(request.song) }.getOrNull()
             mvChecked = true
         }
     }
-    val mvActive = musicVideoWanted && musicVideo != null
+    /** The deck's video when there is one; the re-matched one otherwise. */
+    val effectiveMusicVideo = deckVideo ?: musicVideo
+    val mvActive = musicVideoWanted && effectiveMusicVideo != null
     val clip = background.source?.takeIf { asVideo }?.let(clips::get)?.let { found ->
         // A story is 9:16: the 3:4 rendition crops to it with less thrown away.
         if (story) found.copy(url = found.portraitUrl ?: found.url) else found
@@ -165,7 +196,7 @@ internal fun AndroidLyricsShareSheet(
     // that stretch of the song, each line lighting up as the vocal reaches it.
     val timeline = remember(request) { shareTimeline(request.lines) }
     // Nothing would move in a video with no vocal to follow and no clip.
-    val videoPossible = timeline != null || clips.isNotEmpty() || musicVideo != null
+    val videoPossible = timeline != null || clips.isNotEmpty() || effectiveMusicVideo != null
     val isVideo = asVideo && (clip != null || timeline != null || mvActive)
     // Saving runs from the tap until the file is in the gallery: the export,
     // then the copy. "Saved!" only once both are done.
@@ -222,13 +253,14 @@ internal fun AndroidLyricsShareSheet(
     // preview runs it on the song's own clock, so what is shared is what was
     // seen. [image] is the still card, for the frame's shape and for a PNG.
     var painter by remember(request) { mutableStateOf<LyricsCardPainter?>(null) }
-    LaunchedEffect(request, story, showLogo, background, asVideo, fxTemplate, crossfadeEnabled, musicVideoWanted, musicVideo) {
+    LaunchedEffect(request, story, showLogo, background, asVideo, fxTemplate, crossfadeEnabled, musicVideoWanted, musicVideo, deckVideo, mvPoster) {
         image = null
         painter = null
         failed = false
         saved = false
         runCatching {
             val activeFx = if (isVideo) fxTemplate else ShareFxTemplate.CLEAN_STORY
+            val mvOn = musicVideoWanted && (deckVideo ?: musicVideo) != null
             val paint = lyricsCardPainter(
                 context = context,
                 card = request,
@@ -236,11 +268,19 @@ internal fun AndroidLyricsShareSheet(
                 showLogo = showLogo,
                 // No backdrop of its own over a moving background: a Canvas
                 // clip, or the music video when that is the background.
-                transparent = activeClip != null || mvActive,
+                transparent = activeClip != null || mvOn,
                 fxTemplate = activeFx,
                 crossfade = crossfadeEnabled && isVideo,
             )
-            image = withContext(Dispatchers.Default) { paint.render(null) }
+            var still = withContext(Dispatchers.Default) { paint.render(null) }
+            // A still share over the playing video: the card is transparent,
+            // so its background is the video's poster frame, dimmed the way
+            // the video itself is dimmed in the export.
+            val poster = mvPoster
+            if (!isVideo && mvOn && deckVideo != null && poster != null) {
+                still = withContext(Dispatchers.Default) { compositeOverPoster(poster, still) }
+            }
+            image = still
             painter = paint
         }.onFailure { failed = true }
     }
@@ -251,7 +291,7 @@ internal fun AndroidLyricsShareSheet(
     var exportProgress by remember(request) { mutableIntStateOf(0) }
     var exported by remember(request) { mutableStateOf<Pair<Any, File>?>(null) }
     suspend fun videoFile(): File? {
-        val look = listOf(activeClip, story, showLogo, fxTemplate, crossfadeEnabled, mvActive)
+        val look = listOf(activeClip, story, showLogo, fxTemplate, crossfadeEnabled, mvActive, effectiveMusicVideo?.url)
         exported?.takeIf { it.first == look && it.second.exists() }?.let { return it.second }
         exporting = true
         exportProgress = 0
@@ -272,7 +312,7 @@ internal fun AndroidLyricsShareSheet(
                 portrait = story,
                 crossfade = crossfadeEnabled,
                 onProgress = { percent -> exportProgress = percent },
-                musicVideo = if (mvActive) musicVideo else null,
+                musicVideo = if (mvActive) effectiveMusicVideo else null,
             )?.also { exported = look to it }
         } finally {
             exporting = false
@@ -411,6 +451,28 @@ internal fun AndroidLyricsShareSheet(
                     )
                     if (exporting) ExportProgress(exportProgress)
                 }
+            } else if (mvActive && deckVideo != null && mvPoster != null) {
+                // The playing video's poster under the card, dimmed as the
+                // export dims the video itself: the preview shows the share's
+                // real background without a second decoder.
+                Box(modifier = preview, contentAlignment = Alignment.Center) {
+                    Image(
+                        bitmap = mvPoster!!.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize(),
+                    )
+                    Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = MV_POSTER_SCRIM)))
+                    CardPreview(
+                        painter = painter,
+                        card = bitmap,
+                        timeline = timeline.takeIf { isVideo },
+                        previewPlayer = previewPlayer.takeIf { previewAudioReady && isVideo && previewAudioEnabled },
+                        crossfade = crossfadeEnabled && isVideo,
+                        modifier = Modifier.matchParentSize(),
+                    )
+                    if (exporting) ExportProgress(exportProgress)
+                }
             } else {
                 Box(modifier = preview, contentAlignment = Alignment.Center) {
                     CardPreview(
@@ -494,13 +556,14 @@ internal fun AndroidLyricsShareSheet(
                     }
                 }
 
-                // Only offered once the song's music video has actually been
-                // resolved: a toggle for a video that may not exist would
-                // mostly be a toggle that does nothing. The preview keeps
-                // showing the card alone — the video deck's surface belongs
-                // to the playing song, not to this sheet — so what changes
-                // here is the export: the video under the words, dimmed.
-                if (musicVideo != null) {
+                // Only offered once a music video actually exists for the
+                // share: the one the video deck is playing for this song when
+                // it is, else the one resolved by matching. A toggle for a
+                // video that may not exist would mostly be a toggle that
+                // does nothing. With the deck's video, the preview shows its
+                // poster frame under the card; the export plays the video
+                // itself under the words, dimmed.
+                if (effectiveMusicVideo != null) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -689,10 +752,30 @@ private fun ExportProgress(percent: Int) {
 }
 
 /**
- * The card as the video will play it: [painter] drawn every frame at the
- * moment of the song the loop has reached — the syllable sweep, the lifts and
- * the held words, as in the player. The still [card] when there's no vocal to
+ * The card as the video will play it: [painter] drawn at the moment of the
+ * song the loop has reached — the syllable sweep, the lifts and the held
+ * words, as in the player. The still [card] when there's no vocal to
  * follow, or until the painter is ready.
+ *
+ * ## Why it renders off the main thread, at the preview's own size
+ *
+ * The painter is a software canvas at the card's full 1080-wide size, with
+ * save-layers and blur filters per frame. Drawing that on the UI thread at
+ * sixty frames a second — then scaling the result down to a third of the
+ * screen — was the preview's judder: the frame budget was spent on pixels
+ * nobody sees, on the thread that also has to compose the sheet.
+ *
+ * So: the frame clock ([withFrameMillis], scoped to this composable) only
+ * computes WHERE the song is. The drawing happens on a background
+ * dispatcher into a bitmap at the preview's measured pixel size, from two
+ * alternating buffers so the canvas never reads a half-drawn frame. Frames
+ * are latest-wins — if a frame is still drawing when the next tick comes,
+ * that tick is skipped rather than queued, so the preview can lag a frame
+ * but never falls behind the song. The painter's static layer (backdrop,
+ * sleeve, credit) is rendered once into its own bitmap — the cache key is
+ * the painter itself, which the sheet rebuilds whenever the template, the
+ * song or any option changes, plus the preview size — and each frame is
+ * just that bitmap with the dynamic lyric layer drawn over it.
  */
 @Composable
 private fun CardPreview(
@@ -708,45 +791,100 @@ private fun CardPreview(
         Image(bitmap = card.asImageBitmap(), contentDescription = description, modifier = modifier)
         return
     }
-    var elapsedMs by remember(painter, timeline) { mutableLongStateOf(0L) }
+    var frame by remember(painter, timeline) { mutableStateOf<Bitmap?>(null) }
+    var viewSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     val totalMs = timeline.durationMs.coerceAtLeast(1L)
-    LaunchedEffect(painter, timeline, previewPlayer, crossfade) {
+    LaunchedEffect(painter, timeline, previewPlayer, crossfade, viewSize) {
+        val w = viewSize.width
+        val h = viewSize.height
+        if (w <= 0 || h <= 0) return@LaunchedEffect
+        val scale = w.toFloat() / painter.width
+        // The static layer, once: everything on the card that never moves.
+        val staticBmp = withContext(Dispatchers.Default) {
+            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
+                val c = android.graphics.Canvas(bmp)
+                c.scale(scale, scale)
+                painter.drawStaticOn(c)
+            }
+        }
+        val buffers = Array(2) { Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888) }
+        var back = 0
+        var renderJob: Job? = null
         val start = withFrameMillis { it }
         val length = (totalMs + PREVIEW_REST_MS).coerceAtLeast(1L)
-        while (true) {
-            withFrameMillis { now ->
-                val player = previewPlayer
-                val current = if (player != null && player.isPlaying) {
-                    // Sum durations of preceding clipped segments + current item's position
-                    val idx = player.currentMediaItemIndex.coerceIn(0, (timeline.segments.size - 1).coerceAtLeast(0))
-                    var prefix = 0L
-                    for (i in 0 until idx) {
-                        val (s, e) = timeline.segments[i]
-                        prefix += (e - s).coerceAtLeast(0L)
-                    }
-                    (prefix + player.currentPosition.coerceAtLeast(0L)).coerceIn(0L, totalMs)
-                } else {
-                    (now - start) % length
+        while (isActive) {
+            val now = withFrameMillis { it }
+            val player = previewPlayer
+            val current = if (player != null && player.isPlaying) {
+                // Sum durations of preceding clipped segments + current item's position
+                val idx = player.currentMediaItemIndex.coerceIn(0, (timeline.segments.size - 1).coerceAtLeast(0))
+                var prefix = 0L
+                for (i in 0 until idx) {
+                    val (s, e) = timeline.segments[i]
+                    prefix += (e - s).coerceAtLeast(0L)
                 }
-                elapsedMs = current
-                if (player != null) {
-                    player.volume = if (crossfade) shareCrossfadeEnvelope(current, totalMs) else 1f
+                (prefix + player.currentPosition.coerceAtLeast(0L)).coerceIn(0L, totalMs)
+            } else {
+                (now - start) % length
+            }
+            if (player != null) {
+                player.volume = if (crossfade) shareCrossfadeEnvelope(current, totalMs) else 1f
+            }
+            // Latest-wins: never queue a frame behind one still drawing.
+            if (renderJob?.isActive != true) {
+                val target = buffers[back]
+                back = 1 - back
+                val at = timeline.trackMsAt(current * 1000L)
+                renderJob = launch(Dispatchers.Default) {
+                    val c = android.graphics.Canvas(target)
+                    c.drawBitmap(staticBmp, 0f, 0f, null)
+                    c.save()
+                    c.scale(scale, scale)
+                    painter.drawDynamicOn(c, at, elapsedMs = current, totalMs = totalMs)
+                    c.restore()
+                    frame = target
                 }
             }
         }
     }
-    Canvas(modifier.semantics { contentDescription = description }) {
-        val clamped = elapsedMs.coerceIn(0L, totalMs)
-        val at = timeline.trackMsAt(clamped * 1000L)
-        val scale = size.width / painter.width
-        drawIntoCanvas { canvas ->
-            val native = canvas.nativeCanvas
-            native.save()
-            native.scale(scale, scale)
-            painter.drawOn(native, at, elapsedMs = clamped, totalMs = totalMs)
-            native.restore()
+    val shown = frame
+    if (shown == null) {
+        Image(bitmap = card.asImageBitmap(), contentDescription = description, modifier = modifier.onSizeChanged { viewSize = it })
+    } else {
+        Canvas(modifier.onSizeChanged { viewSize = it }.semantics { contentDescription = description }) {
+            drawImage(shown.asImageBitmap())
         }
     }
+}
+
+/**
+ * A still card over the playing video's poster frame: the poster cropped to
+ * fill the card and dimmed to [MV_DIM]-ish darkness (a black scrim at
+ * [MV_POSTER_SCRIM]), the transparent card drawn over it — the still twin
+ * of the video export's base layer.
+ */
+private fun compositeOverPoster(poster: Bitmap, cardBitmap: Bitmap): Bitmap {
+    val out = Bitmap.createBitmap(cardBitmap.width, cardBitmap.height, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(out)
+    val scale = maxOf(
+        cardBitmap.width.toFloat() / poster.width,
+        cardBitmap.height.toFloat() / poster.height,
+    )
+    val w = poster.width * scale
+    val h = poster.height * scale
+    val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+    canvas.drawBitmap(
+        poster,
+        android.graphics.Rect(0, 0, poster.width, poster.height),
+        android.graphics.RectF(
+            (cardBitmap.width - w) / 2f, (cardBitmap.height - h) / 2f,
+            (cardBitmap.width + w) / 2f, (cardBitmap.height + h) / 2f,
+        ),
+        paint,
+    )
+    canvas.drawColor(android.graphics.Color.argb((MV_POSTER_SCRIM * 255).toInt(), 0, 0, 0))
+    canvas.drawBitmap(cardBitmap, 0f, 0f, null)
+    return out
 }
 
 /** How much of the screen the drawer may take: enough for every control. */
@@ -760,6 +898,9 @@ private const val PREVIEW_REST_MS = 1_200L
 
 /** The black over the Canvas clip in the preview: the export's 60% dim. */
 private const val CLIP_SCRIM = 0.4f
+
+/** The black over the playing video's poster: the export dims the video to 55%, this reads the same. */
+private const val MV_POSTER_SCRIM = 0.45f
 
 /** About the blur the export draws, at the preview's size. */
 private val PREVIEW_BLUR = 10.dp

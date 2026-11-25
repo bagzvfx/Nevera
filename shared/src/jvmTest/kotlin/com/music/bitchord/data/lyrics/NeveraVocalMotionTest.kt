@@ -114,6 +114,78 @@ class NeveraVocalMotionTest {
     }
 
     @Test
+    fun `glyph glow is dark before the sweep arrives`() {
+        // Centre of the 10th letter; the sweep is still letters away.
+        assertEquals(0f, NeveraVocalMotion.glyphGlowBrightness(9.5f, 0f, 0f))
+        assertEquals(0f, NeveraVocalMotion.glyphGlowBrightness(9.5f, 8.3f, 0f))
+        // A held note must not light a letter the singer hasn't reached.
+        assertEquals(0f, NeveraVocalMotion.glyphGlowBrightness(9.5f, 0f, 1f))
+    }
+
+    @Test
+    fun `glyph glow peaks at the sweep crossing and decays behind it`() {
+        val center = 9.5f
+        val before = NeveraVocalMotion.glyphGlowBrightness(center, center - 3f, 0f)
+        val atCrossing = NeveraVocalMotion.glyphGlowBrightness(center, center, 0f)
+        val justPast = NeveraVocalMotion.glyphGlowBrightness(center, center + 0.4f, 0f)
+        val wellPast = NeveraVocalMotion.glyphGlowBrightness(center, center + 8f, 0f)
+        assertEquals(0f, before)
+        assertTrue(atCrossing > 0.5f, "letter should be lit as the sweep crosses it: $atCrossing")
+        assertTrue(justPast >= atCrossing, "peak lands on/just past the crossing: $atCrossing -> $justPast")
+        assertTrue(wellPast < justPast * 0.4f, "light must decay behind the head: $justPast -> $wellPast")
+        // Monotone decay once the attack has completed.
+        var previous = Float.MAX_VALUE
+        var revealed = center + 0.4f
+        while (revealed <= center + 12f) {
+            val brightness = NeveraVocalMotion.glyphGlowBrightness(center, revealed, 0f)
+            assertTrue(brightness <= previous + 1e-4f, "glow brightened behind the head at $revealed")
+            previous = brightness
+            revealed += 0.5f
+        }
+    }
+
+    @Test
+    fun `glyph glow is continuous in the sweep position`() {
+        // No steps: a hundredth of a letter of sweep movement may only move
+        // the brightness by a small, bounded amount — for the plain sweep,
+        // for a held letter, and on a best part with the bass admitted.
+        for ((hold, best) in listOf(0f to false, 1f to false, 0.5f to true)) {
+            var previous = NeveraVocalMotion.glyphGlowBrightness(20.5f, 10f, hold, isBestPart = best)
+            var revealed = 10f
+            while (revealed <= 40f) {
+                val brightness = NeveraVocalMotion.glyphGlowBrightness(
+                    20.5f, revealed, hold, beatBoost = 0.7f, isBestPart = best,
+                )
+                assertTrue(
+                    kotlin.math.abs(brightness - previous) <= 0.03f,
+                    "brightness stepped at $revealed (hold=$hold, best=$best): $previous -> $brightness",
+                )
+                previous = brightness
+                revealed += 0.01f
+            }
+        }
+    }
+
+    @Test
+    fun `glyph glow stays in bounds and a held letter burns brightest`() {
+        var revealed = -5f
+        while (revealed <= 60f) {
+            for (hold in listOf(0f, 0.37f, 1f)) {
+                val brightness = NeveraVocalMotion.glyphGlowBrightness(20.5f, revealed, hold)
+                assertTrue(brightness in 0f..1f, "brightness out of bounds at $revealed/$hold: $brightness")
+            }
+            revealed += 0.25f
+        }
+        val center = 20.5f
+        val plain = NeveraVocalMotion.glyphGlowBrightness(center, center + 0.4f, 0f)
+        val held = NeveraVocalMotion.glyphGlowBrightness(center, center + 0.4f, 1f)
+        assertTrue(held > plain, "a carried note must out-glow the plain sweep: $plain -> $held")
+        assertTrue(held >= 0.99f, "a fully held letter at the crossing should be at full brightness: $held")
+        // A growing word's own per-letter bloom lights its letters directly.
+        assertTrue(NeveraVocalMotion.glyphGlowBrightness(center, 0f, 0f, letterBloom = 0.8f) >= 0.7f)
+    }
+
+    @Test
     fun `revealed chars move monotonically through a synthesized line`() {
         val line = NeveraVocalMotion.ensureKaraokeTiming(
             LyricLine(timeMs = 0L, text = "shine on through the night"),

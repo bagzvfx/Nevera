@@ -196,6 +196,9 @@ import kotlin.math.roundToInt
  * A rung on the app-wide ladder rather than a number of the player's own, so a
  * large home-screen widget asks for the same copy — see [PLAYER_ART_PX].
  */
+/** Segments (and per-frame history samples) of the full-rhythm waveform ribbon. */
+private const val WAVEFORM_SEGMENTS = 28
+
 internal const val ART_PX = PLAYER_ART_PX
 
 /**
@@ -330,9 +333,12 @@ private val PortraitClipScrim = Brush.verticalGradient(
  * this rather than the whole of the player.
  */
 /**
- * Zero-recomposition, VSync-driven **bass-only** rhythm glow harmonized smoothly
+ * Zero-recomposition, VSync-driven rhythm glow harmonized smoothly
  * with the active track's album backdrop colors, paired with delicate luminous
- * floating spirit particles & a subtle live bass waveform ribbon.
+ * floating spirit particles & a subtle live waveform ribbon. The glow bloom
+ * pulses on the bass/beat; the waveform ribbon is drawn from the composite
+ * full-rhythm signal ([com.music.bitchord.playback.NeveraAudioBus.rhythmEnergy])
+ * so it follows the whole song's rhythm, not bass alone.
  *
  * All animation state updates inside [withFrameNanos] and is read exclusively
  * inside [Canvas] draw phase so Compose never recomposes the player screen.
@@ -349,8 +355,15 @@ private fun AudioReactiveBassTrebleGlow(
 
     val bassState = remember { mutableFloatStateOf(0f) }
     val beatState = remember { mutableFloatStateOf(0f) }
+    val rhythmState = remember { mutableFloatStateOf(0f) }
     val reffState = remember { mutableFloatStateOf(0f) }
     val timeSecState = remember { mutableFloatStateOf(0f) }
+
+    // Recent composite-rhythm contour for the waveform ribbon: one sample per
+    // rendered frame, oldest → newest. The ribbon is this contour drawn, so
+    // its shape is the song's actual recent rhythm — bass hits, hat patterns
+    // and sustained swells alike — rather than a decorative sine.
+    val waveHistory = remember { FloatArray(WAVEFORM_SEGMENTS) }
 
     // Smoothly interpolated artwork palette tone so surrounding backdrop harmony
     // glides softly between songs without abrupt color jumps.
@@ -379,22 +392,32 @@ private fun AudioReactiveBassTrebleGlow(
 
                 val tBass = if (isPlaying) NeveraAudioBus.bassEnergy.value else 0f
                 val tBeat = if (isPlaying) NeveraAudioBus.beatHit.value else 0f
+                val tRhythm = if (isPlaying) NeveraAudioBus.rhythmEnergy.value else 0f
                 val tReff = if (isPlaying && NeveraAudioBus.isBestPartActive.value) 1f else 0f
 
-                // Tight kick lock (~10ms rise). The fall is kept short (~120ms):
-                // the native analyzer already applies its own release smoothing,
-                // and stacking a second long release on top smears each beat's
-                // peak hundreds of ms past the kick the listener hears.
-                val riseK = 1f - kotlin.math.exp((-dt / 0.010f).toDouble()).toFloat()
+                // The pulse rise is INSTANT (attack ≈ 0): the native analyzer
+                // already shapes the attack (~8 ms), so any rise smoothing
+                // here only re-adds delay between the kick the listener hears
+                // and the glow answering it. The fall is kept short (~120ms):
+                // the native stage applies its own release smoothing, and
+                // stacking a second long release on top smears each beat's
+                // peak hundreds of ms past the kick.
                 val fallK = 1f - kotlin.math.exp((-dt / 0.120f).toDouble()).toFloat()
                 val reffK = 1f - kotlin.math.exp((-dt / 0.50f).toDouble()).toFloat()
                 val toneK = 1f - kotlin.math.exp((-dt / 0.65f).toDouble()).toFloat()
 
                 val curB = bassState.floatValue
-                bassState.floatValue = curB + (tBass - curB) * if (tBass > curB) riseK else fallK
+                bassState.floatValue = if (tBass > curB) tBass else curB + (tBass - curB) * fallK
 
                 val curHit = beatState.floatValue
-                beatState.floatValue = curHit + (tBeat - curHit) * if (tBeat > curHit) riseK else fallK
+                beatState.floatValue = if (tBeat > curHit) tBeat else curHit + (tBeat - curHit) * fallK
+
+                val curRh = rhythmState.floatValue
+                rhythmState.floatValue = if (tRhythm > curRh) tRhythm else curRh + (tRhythm - curRh) * fallK
+
+                // Advance the waveform contour one sample per frame.
+                for (i in 0 until waveHistory.size - 1) waveHistory[i] = waveHistory[i + 1]
+                waveHistory[waveHistory.size - 1] = rhythmState.floatValue
 
                 val curR = reffState.floatValue
                 reffState.floatValue = curR + (tReff - curR) * reffK
@@ -414,6 +437,8 @@ private fun AudioReactiveBassTrebleGlow(
             if (!isPlaying && bassState.floatValue < 0.004f && reffState.floatValue < 0.004f) {
                 bassState.floatValue = 0f
                 beatState.floatValue = 0f
+                rhythmState.floatValue = 0f
+                waveHistory.fill(0f)
                 reffState.floatValue = 0f
                 break
             }
@@ -426,12 +451,13 @@ private fun AudioReactiveBassTrebleGlow(
         if (w <= 0f || h <= 0f) return@Canvas
         val bass = bassState.floatValue
         val beat = beatState.floatValue
+        val rhythm = rhythmState.floatValue
         val reff = reffState.floatValue
         val tSec = timeSecState.floatValue
         val primaryTone = primaryToneState.value
         val ambientTone = ambientToneState.value
 
-        if (bass < 0.004f && reff < 0.004f) return@Canvas
+        if (bass < 0.004f && reff < 0.004f && rhythm < 0.004f) return@Canvas
 
         if (!edgeOverlayOnly) {
             // Smooth multi-stop bass bloom harmonized with the track's own backdrop tone
@@ -537,12 +563,19 @@ private fun AudioReactiveBassTrebleGlow(
                 }
             }
 
-            // 3. Subtle organic live bass waveform breathing gently near the bottom edge
-            val waveAlpha = (bass * 0.24f + beat * 0.14f + reff * 0.10f).coerceIn(0f, 0.36f)
+            // 3. Live full-rhythm waveform ribbon near the bottom edge. Its
+            // contour is the recent history of the composite rhythm signal
+            // (bass + treble + sustain + beat, published on the glow's own
+            // compensated schedule), so the newest sample at the right edge
+            // is the beat being heard right now and the ribbon's shape is
+            // the song's actual rhythm — a bass-light but busy passage
+            // ripples just as a kick-heavy one does. A faint sine shimmer
+            // rides on top only to keep the line organic between samples.
+            val waveAlpha = (rhythm * 0.30f + reff * 0.10f).coerceIn(0f, 0.36f)
             if (waveAlpha > 0.02f) {
                 val baseY = h - 10.dp.toPx()
-                val amp = (6.dp.toPx() + bass * 16.dp.toPx() + beat * 7.dp.toPx())
-                val segs = 28
+                val amp = (4.dp.toPx() + rhythm * 20.dp.toPx())
+                val segs = WAVEFORM_SEGMENTS
                 val stepX = w / segs
                 val waveColor = androidx.compose.ui.graphics.lerp(primaryTone, Color.White, 0.42f)
                 var prevX = 0f
@@ -550,10 +583,11 @@ private fun AudioReactiveBassTrebleGlow(
                 for (s in 1..segs) {
                     val frac = s.toFloat() / segs
                     val env = kotlin.math.sin((frac * kotlin.math.PI).toDouble()).toFloat()
-                    val v = kotlin.math.sin((frac * 9.5f + tSec * 3.8f).toDouble()).toFloat() * 0.65f +
-                        kotlin.math.sin((frac * 18.0f - tSec * 5.2f).toDouble()).toFloat() * 0.35f
+                    val contour = waveHistory[s - 1]
+                    val shimmer = 1f + 0.12f *
+                        kotlin.math.sin((frac * 18.0f - tSec * 5.2f).toDouble()).toFloat()
                     val nx = s * stepX
-                    val ny = baseY - kotlin.math.abs(v) * amp * env
+                    val ny = baseY - contour * shimmer * amp * env
                     drawLine(
                         color = waveColor.copy(alpha = waveAlpha * env),
                         start = Offset(prevX, prevY),

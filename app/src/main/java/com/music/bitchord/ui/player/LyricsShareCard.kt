@@ -335,6 +335,32 @@ internal class LyricsCardPainter internal constructor(
     private val basePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val scratch = Paint(Paint.ANTI_ALIAS_FLAG)
     private val glow = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * Blur filters for the held-letter bloom, by radius: [drawPieces] used to
+     * build a fresh [BlurMaskFilter] for every letter of every frame, and a
+     * mask filter is a small native object — at sixty frames a second that
+     * churn showed up as preview judder. The radii repeat (they are ratios of
+     * the row's type size), so each is built once.
+     */
+    private val glowFilters = HashMap<Float, BlurMaskFilter>()
+
+    private fun glowFilter(radius: Float): BlurMaskFilter =
+        glowFilters.getOrPut(radius) { BlurMaskFilter(radius, BlurMaskFilter.Blur.NORMAL) }
+
+    /** The scrolling viewport's edge fades: fixed by the layout, built once. */
+    private val topFade: LinearGradient by lazy {
+        LinearGradient(
+            0f, layout.viewportTop, 0f, layout.viewportTop + EDGE_FADE,
+            Color.TRANSPARENT, Color.WHITE, Shader.TileMode.CLAMP,
+        )
+    }
+    private val bottomFade: LinearGradient by lazy {
+        LinearGradient(
+            0f, layout.viewportBottom - EDGE_FADE, 0f, layout.viewportBottom,
+            Color.WHITE, Color.TRANSPARENT, Shader.TileMode.CLAMP,
+        )
+    }
     private val curtainPaint = Paint()
     private val fade = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
     private val growth = CharGrowth()
@@ -375,8 +401,36 @@ internal class LyricsCardPainter internal constructor(
         return bitmap
     }
 
+    /**
+     * Everything on the card that never moves: the backdrop, the mark, the
+     * sleeve and credit — [layout]'s base picture. The preview caches this
+     * layer once (keyed by painter and size) and composites it under each
+     * frame instead of paying for it per frame. The FX plaque scenes draw
+     * their backdrop inside the animated scene itself, so for them this
+     * layer is empty and [drawDynamicOn] draws the whole scene.
+     */
+    fun drawStaticOn(canvas: Canvas) {
+        if (plaqueRenderer == null) canvas.drawBitmap(layout.base, 0f, 0f, basePaint)
+    }
+
     /** Draws the card onto [canvas] at the card's own pixel size. */
     fun drawOn(
+        canvas: Canvas,
+        positionMs: Long?,
+        elapsedMs: Long = 0L,
+        totalMs: Long = 0L,
+    ) {
+        drawStaticOn(canvas)
+        drawDynamicOn(canvas, positionMs, elapsedMs, totalMs)
+    }
+
+    /**
+     * Only what moves at [positionMs]: the lyric rows and their sweep (and,
+     * for an FX template, the whole animated scene, backdrop included).
+     * Pairs with [drawStaticOn] — the two together draw exactly what
+     * [drawOn] draws.
+     */
+    fun drawDynamicOn(
         canvas: Canvas,
         positionMs: Long?,
         elapsedMs: Long = 0L,
@@ -397,7 +451,6 @@ internal class LyricsCardPainter internal constructor(
                 transparentBackdrop = transparentBackdrop,
             )
         } else {
-            canvas.drawBitmap(layout.base, 0f, 0f, basePaint)
 
             // Smooth camera scroll for long lyric passages (up to 1m 30s) inside the clipped viewport
             val scrollOffset = if (layout.scrolls && positionMs != null && active >= 0) {
@@ -433,17 +486,10 @@ internal class LyricsCardPainter internal constructor(
                     drawRow(canvas, placed, positionMs, active)
                 }
                 canvas.restore()
-                val edgeFade = 56f
-                fade.shader = LinearGradient(
-                    0f, layout.viewportTop, 0f, layout.viewportTop + edgeFade,
-                    Color.TRANSPARENT, Color.WHITE, Shader.TileMode.CLAMP,
-                )
-                canvas.drawRect(0f, layout.viewportTop, width.toFloat(), layout.viewportTop + edgeFade, fade)
-                fade.shader = LinearGradient(
-                    0f, layout.viewportBottom - edgeFade, 0f, layout.viewportBottom,
-                    Color.WHITE, Color.TRANSPARENT, Shader.TileMode.CLAMP,
-                )
-                canvas.drawRect(0f, layout.viewportBottom - edgeFade, width.toFloat(), layout.viewportBottom, fade)
+                fade.shader = topFade
+                canvas.drawRect(0f, layout.viewportTop, width.toFloat(), layout.viewportTop + EDGE_FADE, fade)
+                fade.shader = bottomFade
+                canvas.drawRect(0f, layout.viewportBottom - EDGE_FADE, width.toFloat(), layout.viewportBottom, fade)
                 canvas.restoreToCount(vpSave)
             } else {
                 for (placed in layout.rows) drawRow(canvas, placed, positionMs, active)
@@ -594,7 +640,7 @@ internal class LyricsCardPainter internal constructor(
                     if (bloom && growth.bloom > 0.01f) {
                         glow.set(paint)
                         glow.alpha = (paint.alpha * growth.bloom.coerceAtMost(1f)).roundToInt()
-                        glow.maskFilter = BlurMaskFilter(size * GLOW_RATIO, BlurMaskFilter.Blur.NORMAL)
+                        glow.maskFilter = glowFilter(size * GLOW_RATIO)
                         canvas.drawText(text, k, k + 1, cx - w / 2f, y, glow)
                     }
                     canvas.drawText(text, k, k + 1, cx - w / 2f, y, paint)
@@ -617,7 +663,7 @@ internal class LyricsCardPainter internal constructor(
                     if (bloom && (sustainEnv > 0.05f || buoyancy > 0.20f)) {
                         glow.set(paint)
                         glow.alpha = (paint.alpha * (sustainEnv * 0.72f + buoyancy * 0.28f).coerceAtMost(0.9f)).roundToInt()
-                        glow.maskFilter = BlurMaskFilter(size * GLOW_RATIO, BlurMaskFilter.Blur.NORMAL)
+                        glow.maskFilter = glowFilter(size * GLOW_RATIO)
                         canvas.drawText(text, k, k + 1, left, y, glow)
                     }
                     canvas.drawText(text, k, k + 1, left, y, paint)
@@ -883,6 +929,9 @@ private const val HEADROOM_RATIO = 0.35f
 
 /** The bloom behind a held letter: GLOW_RADIUS, 6dp. */
 private const val GLOW_RATIO = 6f / 34f
+
+/** How far the scrolling viewport's rows fade at its edges. */
+private const val EDGE_FADE = 56f
 
 private fun isRtl(text: String): Boolean =
     !java.text.Bidi(text, java.text.Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT).baseIsLeftToRight()

@@ -121,6 +121,12 @@ fun BrowseActionsMenu(
      */
     onShare: (() -> Unit)? = null,
     /**
+     * Saves the playlist as a `.nevera` file through the system picker — set
+     * only for playlists kept on this device, whose tracks are all here to
+     * write down. See [com.music.bitchord.data.playlist.NeveraPlaylistFile].
+     */
+    onExport: (() -> Unit)? = null,
+    /**
      * Set whenever [target] is a playlist, regardless of who owns it — pinning
      * doesn't touch the account, only what sits at the top of this device's
      * Library tab. Null everywhere else (albums, artists), where "pin" has
@@ -253,6 +259,9 @@ fun BrowseActionsMenu(
             }
             onShare?.let {
                 ActionRow(SfIcons.Share, stringResource(R.string.share), onClick = it)
+            }
+            onExport?.let {
+                ActionRow(SfIcons.Share, stringResource(R.string.export_nevera), onClick = it)
             }
             onTogglePin?.let {
                 ActionRow(

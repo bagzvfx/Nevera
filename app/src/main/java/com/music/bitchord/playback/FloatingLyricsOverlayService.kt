@@ -324,9 +324,12 @@ class FloatingLyricsOverlayService : Service() {
                 displayPosMs = snapshot.anchorPositionMs.toDouble()
             }
 
-            // Smooth bass energy for spirit particles & Reff breathing
+            // Bass energy for spirit particles & Reff breathing. The rise is
+            // near-instant (10 ms, matching the player glow): the bus values
+            // are already shaped and latency-compensated upstream, so a slow
+            // rise here would only re-add lag to the pulse.
             val targetBass = if (snapshot.isPlaying) NeveraAudioBus.bassEnergy.value else 0f
-            val bassK = 1f - exp((-dtSec / if (targetBass > smoothBass) 0.04f else 0.12f).toDouble()).toFloat()
+            val bassK = 1f - exp((-dtSec / if (targetBass > smoothBass) 0.010f else 0.12f).toDouble()).toFloat()
             smoothBass += (targetBass - smoothBass) * bassK
             if (snapshot.isPlaying) {
                 spiritTimeSec += dtSec * (1f + smoothBass * 0.65f)

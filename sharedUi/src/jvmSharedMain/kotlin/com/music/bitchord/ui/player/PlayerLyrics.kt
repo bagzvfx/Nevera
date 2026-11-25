@@ -218,41 +218,31 @@ private const val UNSUNG_ALPHA_STRIP = 0.55f
 /**
  * The bloom behind the line being sung, at its very strongest.
  *
- * Kept well under half strength: the halo is drawn from the same white as the
- * text, so at full alpha it stops reading as light and starts reading as a
- * second, badly printed copy of the words. What is actually drawn is this
- * scaled by each letter's own bloom, so only a properly carried note ever sees
- * the whole of it.
+ * Kept well under full strength: a letter's halo at full alpha stops reading
+ * as light and starts reading as a blob. What is actually drawn is this
+ * scaled by each letter's own brightness — see
+ * [NeveraVocalMotion.glyphGlowBrightness] — so only a properly carried note
+ * ever sees the whole of it.
  *
- * The bloom used to be a band of light trailing the sweep's leading edge across
- * every line, which is a lamp being dragged along under the words: a shape that
- * belongs to the highlight rather than to the singing, present on patter and
- * held notes alike. It is now attached to the letters of the held words
- * themselves — see [LyricLine.growingWords][com.music.bitchord.data.lyrics.LyricLine.growingWords]
- * — so a line of quick syllables has no glow at all and a carried note lights
- * up letter by letter, which is where the light was always meant to come from.
+ * The bloom's history is a lesson in shapes: first a band of light trailing
+ * the sweep's leading edge (a lamp dragged along under the words), then the
+ * text redrawn under a blur and cut down by masks — rectangles, then
+ * feathered rectangles, whose edges the eye still followed as the glow
+ * moved. It is now one radial halo per letter, stamped by [glyphGlow]: a
+ * shape with no edges at all, lit letter by letter as the singing crosses
+ * them, which is where the light was always meant to come from.
  */
 private const val GLOW_ALPHA = 0.62f
 
 /**
- * How far the bloom spreads off a letter. A letter's worth of light rather
- * than a word's, so it stays well under the line height — but it has to be
- * wider than the steps in the mask it is laid over. At 6.dp the kernel was
- * narrower than the mask's own feathered edges (see
- * [NeveraVocalMotion.glowWindowStops]), and the halo resolved into the
- * mask's rectangular steps: the blocky, pixel-looking glow. At 10.dp the
- * kernel spans those steps and the light reads as light again.
- */
-private val GLOW_RADIUS = 10.dp
-
-/**
  * Room reserved inside each copy of a line for the halo to spread into.
  *
- * A blur is computed on its layer's own bitmap, so a halo with nowhere to go
- * inside those bounds is a halo with a hard edge — which is what cropped the
- * bloom to the line's box. Every copy carries the same inset so they still lay
- * out identically, and the list gives the width back by taking it off its own
- * padding and row spacing.
+ * A letter's halo reaches about a letter's width past the letter itself, and
+ * light with nowhere to go inside the line's own bounds is light cropped at
+ * the box — a hard edge of exactly the kind the per-letter halos exist to
+ * avoid. Every copy carries the same inset so they still lay out identically,
+ * and the list gives the width back by taking it off its own padding and row
+ * spacing.
  */
 private val GLOW_ROOM = 10.dp
 
@@ -805,11 +795,11 @@ private const val SAME_CLOCK_NANOS = 250_000_000L
  * The clip is recomputed in the draw phase, so a frame costs one clip and one
  * redraw of already-measured text.
  *
- * [glowAlpha] adds Apple's bloom: a third copy, blurred, behind the other two
- * and clipped to the letters of whatever word is being held. Blurring *after*
- * the clip rather than before is what makes the halo bleed out past the letter
- * it belongs to, which is the part that reads as light coming off a carried
- * note rather than a drop shadow sitting under the line.
+ * [glowAlpha] adds the bloom: behind the other two copies, one soft halo per
+ * letter of the line, each letter radiating at its own brightness as the
+ * sweep crosses it and for as long as its note is held — see [glyphGlow].
+ * The glow copy itself paints no text; its draw pass stamps the halos, and
+ * the lit copy above them is what the eye reads as the letters.
  */
 @Composable
 private fun SweptLyricLine(
@@ -821,7 +811,6 @@ private fun SweptLyricLine(
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
     glowAlpha: Float = 0f,
-    glowRadius: Dp = GLOW_RADIUS,
     glowRoom: Dp = 0.dp,
     glowLayerOutset: Dp = 0.dp,
     feather: Boolean = false,
@@ -840,6 +829,12 @@ private fun SweptLyricLine(
     // rather than allocated per frame: a held word is seven letters at the
     // outside, but this runs on every frame of every line that has one.
     val growth = remember { CharGrowth() }
+
+    // Per-letter halo geometry for the glow, rebuilt only when the layout
+    // changes, and the cached radial brushes it is stamped with — a frame of
+    // the glow changes alphas, never shapes. See [glyphGlow].
+    val glowCache = remember(line) { GlyphGlowCache() }
+    val haloBrushes = remember(color) { unitHaloBrushes(haloColorFor(color)) }
 
     // Where this line is in its own animation — not started, moving, or done —
     // which changes three times a line rather than sixty times a second. The
@@ -958,25 +953,28 @@ private fun SweptLyricLine(
                 color = color,
                 maxLines = maxLines,
                 overflow = overflow,
+                // No blur and no mask: the draw pass stamps one radial halo
+                // per letter and deliberately never calls drawContent, so
+                // this copy contributes light and nothing else. It used to
+                // redraw the text under a blur, cut down by masked rectangles
+                // — feathered in the end, but still rectangles, and the eye
+                // followed their edges as the glow moved.
                 modifier = glowAlphaLayer
-                    .blur(glowRadius, BlurredEdgeTreatment.Unbounded)
                     .then(room)
-                    // Each letter is masked to its own brightness with DstIn,
-                    // which needs a layer of its own to erase into — against the
-                    // backdrop it would take the artwork with it.
-                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
                     .drawWithContent {
-                        // Lights both held notes AND the active Reff/Best Part wave crest
-                        // so chorus lines radiate a warm luminous aura synced to the voice.
-                        val measured = layout ?: return@drawWithContent
-                        glowGrown(
-                            layout = measured,
-                            line = line,
-                            positionMs = drawnAt(),
-                            inset = glowRoom.toPx(),
-                            peak = WORD_RISE.toPx(),
-                            growth = growth,
-                        )
+                        val measured = layout
+                        if (measured != null && line.words.isNotEmpty()) {
+                            glyphGlow(
+                                layout = measured,
+                                line = line,
+                                positionMs = drawnAt(),
+                                inset = glowRoom.toPx(),
+                                peak = WORD_RISE.toPx(),
+                                growth = growth,
+                                cache = glowCache,
+                                brushes = haloBrushes,
+                            )
+                        }
                     },
             )
         }
@@ -1024,272 +1022,207 @@ private fun SweptLyricLine(
 }
 
 /**
- * Feathers a glow mask that has already been drawn into this layer: multiplies
- * its alpha by a window that fades to nothing at the box's edges, so the
- * halo's boundary is a gradient the blur can finish rather than a rectangle
- * it cannot hide.
- *
- * [hStops] are (offset, multiplier) stops across the width — see
- * [NeveraVocalMotion.glowWindowStops] and
- * [NeveraVocalMotion.glowLeadStops] — scaled by [peakAlpha]. The vertical
- * pass is a plain window peaking at 1, so the two multiply to
- * peakAlpha × windowH × windowV: the middle of the box keeps exactly the
- * brightness it was given, and only the edges fall away.
+ * One letter's halo, precomputed from a finished layout: where the letter
+ * sits and how far its light spreads. Built once per layout — a frame of the
+ * glow may only read these and change alphas, never measure text.
  */
-private fun DrawScope.featherGlowMask(
-    left: Float,
-    top: Float,
-    right: Float,
-    bottom: Float,
-    hStops: List<Pair<Float, Float>>,
-    vFeatherFraction: Float,
-    peakAlpha: Float,
-) {
-    val width = right - left
-    val height = bottom - top
-    if (width <= 0f || height <= 0f || peakAlpha <= 0f) return
-    drawRect(
-        brush = Brush.horizontalGradient(
-            colorStops = hStops.map { (offset, multiplier) ->
-                offset to Color.White.copy(alpha = (multiplier * peakAlpha).coerceIn(0f, 1f))
-            }.toTypedArray(),
-            startX = left,
-            endX = right,
-        ),
-        topLeft = Offset(left, top),
-        size = Size(width, height),
-        blendMode = BlendMode.DstIn,
-    )
-    val vStops = com.music.bitchord.data.lyrics.NeveraVocalMotion.glowWindowStops(vFeatherFraction)
-    if (vStops.any { it.second < 1f }) {
-        drawRect(
-            brush = Brush.verticalGradient(
-                colorStops = vStops.map { (offset, multiplier) ->
-                    offset to Color.White.copy(alpha = multiplier)
-                }.toTypedArray(),
-                startY = top,
-                endY = bottom,
-            ),
-            topLeft = Offset(left, top),
-            size = Size(width, height),
-            blendMode = BlendMode.DstIn,
-        )
+private class GlyphGlowGeometry(
+    val centerX: FloatArray,
+    val centerY: FloatArray,
+    val radius: FloatArray,
+    /** Which of the line's words each letter belongs to; -1 for the gaps. */
+    val wordIndex: IntArray,
+)
+
+/** Holds the [GlyphGlowGeometry] for the layout a line is currently drawn with. */
+private class GlyphGlowCache {
+    private var layout: TextLayoutResult? = null
+    private var geometry: GlyphGlowGeometry? = null
+
+    fun geometryFor(
+        layout: TextLayoutResult,
+        line: LyricLine,
+        inset: Float,
+        em: Float,
+    ): GlyphGlowGeometry {
+        val cached = geometry
+        if (cached != null && this.layout === layout) return cached
+        val built = buildGlyphGlowGeometry(layout, line, inset, em)
+        this.layout = layout
+        geometry = built
+        return built
     }
 }
 
+private fun buildGlyphGlowGeometry(
+    layout: TextLayoutResult,
+    line: LyricLine,
+    inset: Float,
+    em: Float,
+): GlyphGlowGeometry {
+    val text = layout.layoutInput.text
+    val count = text.length
+    val centerX = FloatArray(count)
+    val centerY = FloatArray(count)
+    val radius = FloatArray(count)
+    val wordIndex = IntArray(count) { -1 }
+    for ((index, span) in line.wordSpans.withIndex()) {
+        for (char in span) {
+            if (char in 0 until count) wordIndex[char] = index
+        }
+    }
+    for (char in 0 until count) {
+        if (text[char].isWhitespace()) continue
+        val visualLine = layout.getLineForOffset(char)
+        val from = layout.xOn(char, visualLine, inset)
+        val to = layout.xOn(char + 1, visualLine, inset)
+        if (to <= from) continue
+        centerX[char] = (from + to) / 2f
+        centerY[char] = (layout.getLineTop(visualLine) + layout.getLineBottom(visualLine)) / 2f + inset
+        // The halo's reach: about a letter of light in every direction, so
+        // neighbouring letters' halos overlap and merge into one radiance
+        // instead of standing apart as separate dots.
+        radius[char] = maxOf(em * 0.9f, (to - from) * 1.1f).coerceAtMost(em * 1.3f)
+    }
+    return GlyphGlowGeometry(centerX, centerY, radius, wordIndex)
+}
+
+/** Brightness steps the halo brushes are cached in; see [unitHaloBrushes]. */
+private const val GLOW_ALPHA_BUCKETS = 24
+
+/** Under this brightness a letter's halo is not worth a draw call. */
+private const val GLYPH_GLOW_MIN_DRAW = 0.02f
+
 /**
- * Draws this text clipped to the letters of the words being held, each at its
- * own brightness — the light the singing is actually giving off, rather than a
- * band of it dragged along behind the highlight.
- *
- * Nothing at all on a line of ordinary syllables: the words that light up are
- * the ones held long enough to have earned it, so a verse of patter is simply
- * dark and costs one comparison to establish. That selectiveness is the point.
- * A glow present on every word is a property of the highlight; a glow that
- * arrives only when a note is carried is a property of the voice.
- *
- * Each letter is masked to its own bloom rather than drawn at it, because the
- * caller's layer is what this erases into — see [SweptLyricLine]. The mask
- * lands before the blur, so what spreads is already the right brightness.
+ * Past this many letters a line only draws halos near the sweep and around
+ * held words — a safety valve for freak lines, far above any real lyric.
  */
-private fun ContentDrawScope.glowGrown(
+private const val GLYPH_GLOW_WINDOW_THRESHOLD = 160
+
+/**
+ * Unit radial-gradient brushes, one per brightness bucket, for [color].
+ *
+ * A radial gradient is defined in the caller's coordinates, so a brush per
+ * letter per frame would allocate exactly as fast as the glow moves. These
+ * are built once around the origin at radius 1 and drawn under a
+ * translate/scale transform per letter, so a frame allocates nothing: it
+ * picks the bucket nearest the letter's brightness and stamps it.
+ */
+private fun unitHaloBrushes(color: Color): Array<Brush> = Array(GLOW_ALPHA_BUCKETS + 1) { bucket ->
+    val a = bucket.toFloat() / GLOW_ALPHA_BUCKETS
+    Brush.radialGradient(
+        colorStops = arrayOf(
+            0f to color.copy(alpha = a),
+            0.45f to color.copy(alpha = a * 0.38f),
+            1f to Color.Transparent,
+        ),
+        center = Offset.Zero,
+        radius = 1f,
+    )
+}
+
+/** The light a line radiates: warm gold for the default voice, its own colour otherwise. */
+private fun haloColorFor(color: Color): Color =
+    if (color == Color.White) Color(0xFFFFDFA6) else color
+
+/**
+ * Draws the active line's glow as one soft halo per letter — no text replay,
+ * no blur pass, and no masks anywhere.
+ *
+ * Every earlier version of this glow drew the text again and cut the copy
+ * down with masks (per word, per row, per letter; plain rectangles, then
+ * feathered ones). Feathering softened the blocks at rest, but a mask is
+ * still a shape with edges, and once it moved the eye caught the shape
+ * travelling: the glow went across the line as boxes. A halo has no edges to
+ * catch — a radial gradient is at its brightest on the letter and gone a
+ * letter's width away — so letters can light one after another and the light
+ * simply travels.
+ *
+ * Each letter's brightness is [NeveraVocalMotion.glyphGlowBrightness]: a
+ * continuous function of the sweep position and the letter's own hold, so
+ * nothing steps. The halos are stamped additively ([BlendMode.Plus]) under
+ * the lit copy, which is drawn over them by the caller; where neighbours
+ * overlap, their light adds, the way light does.
+ *
+ * The gating matches what the masked glow did: nothing outside the line
+ * being sung and the settle of its held words, and nothing at all on a line
+ * with no word timings to sing by.
+ */
+private fun DrawScope.glyphGlow(
     layout: TextLayoutResult,
     line: LyricLine,
     positionMs: Long,
     inset: Float,
     peak: Float,
     growth: CharGrowth,
+    cache: GlyphGlowCache,
+    brushes: Array<Brush>,
 ) {
-    val isBestPart = com.music.bitchord.playback.NeveraAudioBus.isBestPartActive.value
-    val beatBoost = com.music.bitchord.playback.NeveraAudioBus.bassEnergy.value
+    val isBestPart = NeveraAudioBus.isBestPartActive.value
+    val beatBoost = NeveraAudioBus.bassEnergy.value
     val inActiveLine = positionMs in line.timeMs..(line.endMs + 450L)
     val hasHeld = line.isGrowing(positionMs)
-
-    if (!hasHeld && !inActiveLine) return
+    if (!inActiveLine && !hasHeld) return
 
     val em = layout.layoutInput.style.fontSize.toPx()
-    val length = layout.layoutInput.text.length
-    val smartRevealed = com.music.bitchord.data.lyrics.NeveraVocalMotion.smartRevealedChars(line, positionMs)
+    val geometry = cache.geometryFor(layout, line, inset, em)
+    val revealed = com.music.bitchord.data.lyrics.NeveraVocalMotion.smartRevealedChars(line, positionMs)
 
-    // 1. Smart sustained-vocal bloom: any word the vocalist holds (even 480ms+)
-    // radiates a soft, clean luminous halo clipped strictly inside its own visual row
-    // so adjacent wrapped rows never bleed or glitch.
-    if (inActiveLine && line.words.isNotEmpty() && length > 0) {
-        for (visualLine in 0 until layout.lineCount) {
-            val lStart = layout.getLineStart(visualLine)
-            val lEnd = layout.getLineEnd(visualLine, visibleEnd = true)
-            val rowTop = layout.getLineTop(visualLine) + inset
-            val rowBottom = layout.getLineBottom(visualLine) + inset
-            for (index in line.words.indices) {
-                val word = line.words[index]
-                val sustainEnv = com.music.bitchord.data.lyrics.NeveraVocalMotion.vocalHoldEnvelope(word, positionMs)
-                if (sustainEnv <= 0.04f) continue
-                val span = line.wordSpans[index]
-                val start = maxOf(span.first, lStart)
-                val end = minOf(span.last + 1, lEnd)
-                if (start >= end) continue
-                val from = layout.xOn(start, visualLine, inset)
-                val to = layout.xOn(end, visualLine, inset)
-                if (to <= from) continue
-                val wordDy = -(line.wordLift(index, positionMs) + sustainEnv * 0.45f) * peak
-                val bloomAlpha = (sustainEnv * (if (isBestPart) 0.78f else 0.52f) + beatBoost * 0.14f)
-                    .coerceIn(0f, 0.88f)
-                clipRect(
-                    left = from,
-                    top = rowTop + wordDy,
-                    right = to,
-                    bottom = rowBottom + wordDy,
-                ) {
-                    translate(top = wordDy) {
-                        this@glowGrown.drawContent()
-                    }
-                    // Feathered rather than a solid rect: a solid DstIn rect
-                    // hands the blur a mask with a hard step at every word
-                    // boundary and at the row's top and bottom, and the halo
-                    // came out in blocks. The window fades the mask itself,
-                    // so what the blur spreads is already a gradient.
-                    featherGlowMask(
-                        left = from,
-                        top = rowTop + wordDy,
-                        right = to,
-                        bottom = rowBottom + wordDy,
-                        hStops = com.music.bitchord.data.lyrics.NeveraVocalMotion.glowWindowStops(
-                            (em * 0.5f) / (to - from),
-                        ),
-                        vFeatherFraction = 0.22f,
-                        peakAlpha = bloomAlpha,
-                    )
-                }
-            }
-        }
+    // Per-word state for this frame, worked out once rather than per letter.
+    val wordCount = line.words.size
+    val holdEnv = FloatArray(wordCount) {
+        com.music.bitchord.data.lyrics.NeveraVocalMotion.vocalHoldEnvelope(line.words[it], positionMs)
     }
+    val lift = FloatArray(wordCount) { line.wordLift(it, positionMs) }
+    val growingByIndex = line.growingWords.associateBy { it.index }
 
-    // 2. Reff / Best Part climax halo: softly illuminates swept words in warm light.
-    if (isBestPart && inActiveLine && length > 0) {
-        val revealed = smartRevealed.coerceIn(0f, length.toFloat())
-        val auraAlpha = (0.34f + beatBoost * 0.34f).coerceIn(0.26f, 0.74f)
-        for (visualLine in 0 until layout.lineCount) {
-            val lStart = layout.getLineStart(visualLine)
-            val lEnd = layout.getLineEnd(visualLine, visibleEnd = true)
-            if (revealed <= lStart) break
-            val rowTop = layout.getLineTop(visualLine) + inset
-            val bottom = layout.getLineBottom(visualLine) + inset
-            val from = layout.xOn(lStart, visualLine, inset)
-            val endChar = revealed.toInt().coerceIn(lStart, lEnd)
-            val to = if (revealed >= lEnd) {
-                layout.xOn(lEnd, visualLine, inset)
-            } else {
-                val c0 = layout.xOn(endChar, visualLine, inset)
-                val c1 = layout.xOn((endChar + 1).coerceAtMost(lEnd), visualLine, inset)
-                c0 + (c1 - c0) * (revealed - endChar)
-            }
-            if (to > from) {
-                clipRect(left = from, top = rowTop, right = to, bottom = bottom) {
-                    this@glowGrown.drawContent()
-                    // The aura's leading edge follows the sweep, so it is the
-                    // edge the eye tracks: left as a solid rect it ended on a
-                    // hard vertical cut that the blur could not hide. Fade it
-                    // out over the last stretch of the span instead.
-                    featherGlowMask(
-                        left = from,
-                        top = rowTop,
-                        right = to,
-                        bottom = bottom,
-                        hStops = com.music.bitchord.data.lyrics.NeveraVocalMotion.glowLeadStops(
-                            (em * 0.6f) / (to - from),
-                        ),
-                        vFeatherFraction = 0.22f,
-                        peakAlpha = auraAlpha,
-                    )
-                }
+    val length = geometry.centerX.size
+    val windowed = length > GLYPH_GLOW_WINDOW_THRESHOLD
+    for (char in 0 until length) {
+        val haloRadius = geometry.radius[char]
+        if (haloRadius <= 0f) continue
+        val wordIdx = geometry.wordIndex[char]
+        var bloom = 0f
+        var dx = 0f
+        var dy = 0f
+        if (wordIdx >= 0) {
+            // The halo rides the same lift as its letter, or it would be left
+            // behind on the line while the letter rises out of it.
+            dy = -(lift[wordIdx] + holdEnv[wordIdx] * 0.45f) * peak
+            val growing = growingByIndex[wordIdx]
+            if (growing != null && positionMs in growing.startMs..growing.restsAtMs) {
+                val span = line.wordSpans[wordIdx]
+                growing.sampleInto(char - span.first, positionMs, growth)
+                bloom = growth.bloom
+                dx = growth.shift * em
+                dy = -growth.rise * peak * line.wordFall(wordIdx, positionMs)
             }
         }
-    }
-
-    if (!hasHeld) return
-    for (word in line.growingWords) {
-        if (positionMs < word.startMs || positionMs > word.restsAtMs) continue
-        val span = line.wordSpans[word.index]
-        val fall = line.wordFall(word.index, positionMs)
-        // What this word actually paints, per visual row it touches. The
-        // per-letter masks below are solid rectangles, so the word's glow is
-        // a row of hard-edged boxes; once the letters are drawn, one window
-        // pass per row fades the accumulated mask at the word's outer edges
-        // and at the row's top and bottom, which is where the blocks showed.
-        var groupLine = -1
-        var groupFrom = 0f
-        var groupTo = 0f
-        var groupTop = 0f
-        var groupBottom = 0f
-        fun flushGroup() {
-            if (groupLine < 0 || groupTo <= groupFrom) return
-            featherGlowMask(
-                left = groupFrom,
-                top = groupTop,
-                right = groupTo,
-                bottom = groupBottom,
-                hStops = com.music.bitchord.data.lyrics.NeveraVocalMotion.glowWindowStops(
-                    (em * 0.45f) / (groupTo - groupFrom),
-                ),
-                vFeatherFraction = 0.18f,
-                peakAlpha = 1f,
-            )
-            groupLine = -1
+        val brightness = com.music.bitchord.data.lyrics.NeveraVocalMotion.glyphGlowBrightness(
+            glyphCenter = char + 0.5f,
+            revealedChars = revealed,
+            holdEnvelope = if (wordIdx >= 0) holdEnv[wordIdx] else 0f,
+            letterBloom = bloom,
+            beatBoost = beatBoost,
+            isBestPart = isBestPart,
+        )
+        if (brightness < GLYPH_GLOW_MIN_DRAW) continue
+        if (windowed) {
+            val behind = revealed - (char + 0.5f)
+            val nearHeld = wordIdx >= 0 && (holdEnv[wordIdx] > 0.05f || bloom > 0f)
+            if (behind < -2f || (behind > 40f && !nearHeld)) continue
         }
-        for (char in span.first..minOf(span.last, length - 1)) {
-            word.sampleInto(char - span.first, positionMs, growth)
-            if (growth.bloom <= 0.01f) continue
-            val visualLine = layout.getLineForOffset(char)
-            val from = layout.xOn(char, visualLine, inset)
-            val to = layout.xOn(char + 1, visualLine, inset)
-            if (to <= from) continue
-            val dx = growth.shift * em
-            val dy = -growth.rise * peak * fall
-            val rowTop = layout.getLineTop(visualLine) + inset
-            val bottom = layout.getLineBottom(visualLine) + inset
-            val overhang = (to - from) * (growth.scale - 1f) / 2f
-            val scalePad = if (visualLine == 0) peak * 1.2f else 0f
-            val bottomPad = if (visualLine == layout.lineCount - 1) peak * 0.6f else 0f
-            val clipLeft = from - overhang + dx
-            val clipTop = rowTop + dy - scalePad
-            val clipRight = to + overhang + dx
-            val clipBottom = bottom + dy + bottomPad
-            if (visualLine != groupLine) {
-                flushGroup()
-                groupLine = visualLine
-                groupFrom = clipLeft
-                groupTo = clipRight
-                groupTop = clipTop
-                groupBottom = clipBottom
-            } else {
-                groupFrom = minOf(groupFrom, clipLeft)
-                groupTo = maxOf(groupTo, clipRight)
-                groupTop = minOf(groupTop, clipTop)
-                groupBottom = maxOf(groupBottom, clipBottom)
-            }
-            clipRect(
-                left = clipLeft,
-                top = clipTop,
-                right = clipRight,
-                bottom = clipBottom,
-            ) {
-                translate(left = dx, top = dy) {
-                    scale(
-                        growth.scale,
-                        growth.scale,
-                        Offset((from + to) / 2f, (rowTop + bottom) / 2f),
-                    ) {
-                        this@glowGrown.drawContent()
-                    }
-                }
-                val boostBloom = if (isBestPart) (growth.bloom * 1.25f).coerceAtMost(1f) else growth.bloom
-                drawRect(
-                    color = Color.White.copy(alpha = boostBloom),
-                    blendMode = BlendMode.DstIn,
+        val bucket = (brightness * GLOW_ALPHA_BUCKETS).roundToInt().coerceIn(1, GLOW_ALPHA_BUCKETS)
+        translate(left = geometry.centerX[char] + dx, top = geometry.centerY[char] + dy) {
+            scale(scaleX = haloRadius, scaleY = haloRadius, pivot = Offset.Zero) {
+                drawCircle(
+                    brush = brushes[bucket],
+                    radius = 1f,
+                    center = Offset.Zero,
+                    blendMode = BlendMode.Plus,
                 )
             }
         }
-        flushGroup()
     }
 }
 
