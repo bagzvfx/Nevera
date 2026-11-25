@@ -4,6 +4,7 @@ import com.music.bitchord.playback.GlowLatencyPolicy
 import com.music.bitchord.playback.NeveraAudioBus
 import com.music.bitchord.playback.RhythmComposite
 import kotlin.math.abs
+import kotlin.math.roundToLong
 import kotlin.math.pow
 import kotlin.math.sqrt
 import kotlin.math.tanh
@@ -381,7 +382,7 @@ internal class GlowFrameClock {
         lastBlockEndMediaNs = blockEndMediaNs
         val spanNs = (blockEndMediaNs - blockStartMediaNs).coerceAtLeast(0L)
         val stampMediaNs = blockStartMediaNs +
-            (spanNs.toDouble() * offsetFraction.coerceIn(0f, 1f).toDouble()).toLong()
+            (spanNs.toDouble() * offsetFraction.coerceIn(0f, 1f).toDouble()).roundToLong()
         return anchorWallNs + (stampMediaNs - anchorMediaNs)
     }
 

@@ -129,7 +129,7 @@ class GlowFrameClockTest {
         // A late transient stamps late by the same logic.
         val clock2 = GlowFrameClock()
         val readyLate = clock2.readyTimeNsAtFraction(0L, 85 * ms, 0.94f, 1_000 * ms, comp)
-        assertEquals(1_000 * ms + comp + 79_899_999L, readyLate)
+        assertEquals(1_000 * ms + comp + 79_900_000L, readyLate)
     }
 
     @Test
