@@ -1669,4 +1669,29 @@
     <string name="replay_year_summary_minutes">Minutes listened</string>
     <string name="replay_year_mute">Mute the story</string>
     <string name="replay_year_unmute">Unmute the story</string>
+
+    <string name="call_title_miss">Miss</string>
+    <string name="call_title_mr">Mr.</string>
+    <string name="export_nevera">Export .nevera file</string>
+    <string name="export_nevera_done">Playlist exported.</string>
+    <string name="export_nevera_failed">Export failed.</string>
+    <string name="no">No</string>
+    <string name="onboarding_bridge_hint">Swipe up to step inside</string>
+    <string name="onboarding_download_all_body">I won\'t make things hard for you. Want to download all the songs in this playlist?</string>
+    <string name="onboarding_enter">Enter Nevera</string>
+    <string name="onboarding_file_invalid">That file isn\'t a valid .nevera playlist.</string>
+    <string name="onboarding_import_body">Optional — paste a Spotify or YouTube playlist link, or open a .nevera playlist file someone shared with you. We\'ll match the songs and keep the playlist on this device.</string>
+    <string name="onboarding_import_button">Import playlist</string>
+    <string name="onboarding_import_done">Added “%1$s” with %2$d songs.</string>
+    <string name="onboarding_import_failed">That import didn\'t work: %1$s</string>
+    <string name="onboarding_import_file_button">Import a .nevera playlist file</string>
+    <string name="onboarding_import_title">Bring your playlists</string>
+    <string name="onboarding_import_url_hint">Paste a Spotify or YouTube playlist link</string>
+    <string name="onboarding_import_working">Importing…</string>
+    <string name="onboarding_swipe_hint">Swipe up to continue</string>
+    <string name="onboarding_tos_agree">I have read and agree to these rules and terms.</string>
+    <string name="onboarding_tos_body">Nevera is a player for your personal listening. By continuing you agree to these terms:\n\n• Personal use only. Nevera is for your own enjoyment — please don\'t use it to redistribute, re-upload or sell music.\n\n• The music belongs to its owners. Songs, artwork and videos are the property of the artists, labels and YouTube. Nevera simply plays what those services make available.\n\n• Downloads are for offline listening on this device, where the app offers them. Don\'t share downloaded files with others.\n\n• Your account is yours. If you sign in, you\'re responsible for your account and for following YouTube\'s own terms of service.\n\n• Be kind to the services. Automated or abusive use can get accounts and apps restricted, so Nevera may limit features to stay within the rules.\n\n• Things can change. Features may evolve, and content can disappear when its owners or YouTube change what\'s available.</string>
+    <string name="onboarding_tos_title">A few ground rules</string>
+    <string name="onboarding_welcome_home">Welcome home</string>
+    <string name="yes">Yes</string>
 </resources>
