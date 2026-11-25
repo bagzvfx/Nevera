@@ -48,6 +48,17 @@ object NeveraAudioBus {
     /** Enables bass/treble audio-reactive glow on the Now Playing screen. */
     val audioReactiveGlow = MutableStateFlow(true)
 
+    /**
+     * Output-latency compensation, in milliseconds, for the visual glow/waveform.
+     *
+     * Set from the active audio route (see AudioOutputStatus in :app): phone
+     * speaker, wired, USB, HDMI and Bluetooth all deliver sound with different
+     * delays, so no single fixed value can line the glow up on every route. The
+     * mastering DSP delays publication of the analyzed bands by this much so
+     * pulses land when the sound is actually heard.
+     */
+    val glowLatencyCompensationMs = MutableStateFlow(65L)
+
     /** Automatically displays Romaji when Japanese script (Hiragana/Katakana) is detected. */
     val autoJapaneseRomaji = MutableStateFlow(true)
 

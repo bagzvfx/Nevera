@@ -1159,11 +1159,11 @@ fun SettingsScreen(
                 )
             }
             val autoJapaneseRomaji by AppSettings.autoJapaneseRomaji.collectAsStateWithLifecycle()
-            row("Auto-Romaji Jepang", "romaji", "japanese", "lyrics", "lirik") {
+            row("Auto Bacaan Latin Pintar", "romaji", "japanese", "lyrics", "lirik", "korea", "china", "pinyin", "hangul") {
                 SettingsRow(
                     icon = Icons.Rounded.Translate,
-                    title = "Auto-Romaji Pintar (Jepang)",
-                    subtitle = "Otomatis menampilkan Romaji saat lirik berbahasa Jepang terdeteksi",
+                    title = "Auto Bacaan Latin Pintar",
+                    subtitle = "Otomatis menampilkan cara baca Latin (Romaji / Romanisasi Korea / Pinyin) saat lirik Jepang, Korea, atau China terdeteksi",
                     trailing = {
                         IosSwitch(
                             checked = autoJapaneseRomaji,

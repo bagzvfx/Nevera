@@ -3302,19 +3302,24 @@ internal fun rememberLyricsTranslation(
             romanizationJob?.cancel()
         }
     }
-    // Smart Japanese Auto-Romaji: when Japanese Kana (Hiragana/Katakana) is detected
-    // in the song's lyrics, automatically fetch and display Romaji underneath.
+    // Smart Auto Latin Reading: when a non-Latin script whose reading is
+    // shown in Latin letters is detected in the song's lyrics — Japanese
+    // Kana (Hiragana/Katakana, read as Romaji), Korean Hangul (read as
+    // Korean romanization), or Chinese Han characters (read as Pinyin) —
+    // automatically fetch and display that reading underneath.
     LaunchedEffect(trackId, lyrics, autoJapaneseRomaji) {
         val source = lyrics.orEmpty()
         if (!autoJapaneseRomaji || source.isEmpty()) return@LaunchedEffect
         if (romanizationState !is LyricsTranslationUiState.Idle) return@LaunchedEffect
-        val hasJapaneseKana = source.any { line ->
+        val needsRomanization = source.any { line ->
             line.text.any { ch ->
                 val code = ch.code
-                code in 0x3040..0x309F || code in 0x30A0..0x30FF
+                code in 0x3040..0x309F || code in 0x30A0..0x30FF ||
+                    code in 0xAC00..0xD7A3 || code in 0x1100..0x11FF ||
+                    code in 0x3130..0x318F || code in 0x4E00..0x9FFF
             }
         }
-        if (!hasJapaneseKana) return@LaunchedEffect
+        if (!needsRomanization) return@LaunchedEffect
         romanizationState = LyricsTranslationUiState.Loading
         when (
             val result = PlayerPlatform.host.romanizeLyrics(

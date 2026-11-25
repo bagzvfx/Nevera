@@ -6,12 +6,13 @@
 
 <p align="center">
   <strong>Android Music Client — Smooth Editorial UI/UX, Native C++17 Mastering &amp; Bass/Treble Glow, Auto-Romaji, Floating Lyrics Overlay &amp; Hi-Res Lossless Audio</strong><br/>
-  Version <code>4.0.0</code> • Package: <code>com.nevera.corporation</code>
+  Version <code>0.1-beta</code> • Package: <code>com.nevera.corporation</code>
 </p>
 
 ---
 
 ## Highlights (v4.0.0)
+- **Local Playback History & Multi-Script Lyric Reading**: Playback history is recorded locally on-device with no sign-in required, and lyrics get automatic Latin reading lines — Romaji for Japanese, Romanization for Korean, and Pinyin for Chinese.
 - **Clean Editorial UI/UX**: Dark, Light, and Pure OLED themes, Plus Jakarta Sans typography, sharp `4dp` precision surfaces, and hardware-style toggle switches.
 - **Silky-Smooth Lyrics + Smart Auto-Romaji**: Fluid deceleration transitions with automatic Romaji detection for Japanese lyrics.
 - **Floating Lyrics Overlay**: Draggable live lyrics overlay above other apps (`SYSTEM_ALERT_WINDOW`).

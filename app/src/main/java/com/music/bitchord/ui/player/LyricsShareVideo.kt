@@ -139,6 +139,8 @@ internal suspend fun exportLyricsVideo(
     portrait: Boolean,
     /** Smooth audio + visual crossfade at start & end of the video. */
     crossfade: Boolean = true,
+    /** Render progress 0..100 while the video is encoded (0.1-beta); the sheet draws it as a percent bar. */
+    onProgress: (Int) -> Unit = {},
 ): File? {
     val folder = File(context.cacheDir, SHARE_FOLDER).apply { mkdirs() }
     val out = File(folder, VIDEO_FILE_NAME)
@@ -184,7 +186,7 @@ internal suspend fun exportLyricsVideo(
                 .setFrameRate(FRAME_RATE)
                 .setEffects(Effects(emptyList(), listOf(fit(width, height))))
                 .build()
-            return transform(context, EditedMediaItemSequence.Builder(still).build(), audio, overlay, out, lengthMs, crossfade)
+            return transform(context, EditedMediaItemSequence.Builder(still).build(), audio, overlay, out, lengthMs, crossfade, onProgress)
         }
         for (url in urls.orEmpty()) {
             val item = EditedMediaItem.Builder(MediaItem.fromUri(url))
@@ -199,7 +201,7 @@ internal suspend fun exportLyricsVideo(
                 val repeats = ceil(lengthMs / length.toDouble()).toInt().coerceIn(1, MAX_REPEATS)
                 EditedMediaItemSequence.Builder(List(repeats) { item }).build()
             }
-            if (transform(context, video, audio, overlay, out, lengthMs, crossfade)) return true
+            if (transform(context, video, audio, overlay, out, lengthMs, crossfade, onProgress)) return true
         }
         return false
     }
@@ -438,6 +440,7 @@ private suspend fun transform(
     out: File,
     totalDurationMs: Long,
     crossfade: Boolean,
+    onProgress: (Int) -> Unit = {},
 ): Boolean {
     val sequences = mutableListOf(video)
     var songFactory: MediaSource.Factory = DefaultMediaSourceFactory(context)
@@ -493,6 +496,7 @@ private suspend fun transform(
                 )
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                        onProgress(100)
                         if (cont.isActive) cont.resume(true)
                     }
 
@@ -508,8 +512,26 @@ private suspend fun transform(
                 .build()
             out.delete()
             transformer.start(composition, out.path)
-            // The sheet closed mid-export: stop encoding, on the thread it runs on.
-            cont.invokeOnCancellation { Handler(Looper.getMainLooper()).post { transformer.cancel() } }
+            // Poll the encoder's own progress while it runs (0.1-beta): the
+            // sheet shows this as a percent bar instead of an indeterminate
+            // spinner, so a long render reads as progress, not a hang. Polling
+            // stops itself the moment the export settles or is cancelled.
+            val progressHandler = Handler(Looper.getMainLooper())
+            val progressHolder = androidx.media3.transformer.ProgressHolder()
+            val pollProgress = object : Runnable {
+                override fun run() {
+                    if (!cont.isActive) return
+                    runCatching { transformer.getProgress(progressHolder) }
+                    onProgress(progressHolder.progress.coerceIn(0, 100))
+                    progressHandler.postDelayed(this, 200L)
+                }
+            }
+            progressHandler.postDelayed(pollProgress, 200L)
+            cont.invokeOnCancellation {
+                progressHandler.removeCallbacks(pollProgress)
+                // The sheet closed mid-export: stop encoding, on the thread it runs on.
+                Handler(Looper.getMainLooper()).post { transformer.cancel() }
+            }
         }
     }
 }

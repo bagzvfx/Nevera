@@ -15,6 +15,8 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -226,11 +229,14 @@ internal fun AndroidLyricsShareSheet(
 
     // One export per look, reused by Save and Share alike.
     var exporting by remember(request) { mutableStateOf(false) }
+    // Encoder progress 0..100 for the render percent bar (0.1-beta).
+    var exportProgress by remember(request) { mutableIntStateOf(0) }
     var exported by remember(request) { mutableStateOf<Pair<Any, File>?>(null) }
     suspend fun videoFile(): File? {
         val look = listOf(clip, story, showLogo, fxTemplate, crossfadeEnabled)
         exported?.takeIf { it.first == look && it.second.exists() }?.let { return it.second }
         exporting = true
+        exportProgress = 0
         return try {
             // Pause live preview audio while encoding so system resources stay focused on export.
             previewPlayer.playWhenReady = false
@@ -243,8 +249,12 @@ internal fun AndroidLyricsShareSheet(
                 fxTemplate = fxTemplate,
                 crossfade = crossfadeEnabled,
             )
-            exportLyricsVideo(context, request, clip, overlay, portrait = story, crossfade = crossfadeEnabled)
-                ?.also { exported = look to it }
+            exportLyricsVideo(
+                context, request, clip, overlay,
+                portrait = story,
+                crossfade = crossfadeEnabled,
+                onProgress = { percent -> exportProgress = percent },
+            )?.also { exported = look to it }
         } finally {
             exporting = false
         }
@@ -380,7 +390,7 @@ internal fun AndroidLyricsShareSheet(
                         crossfade = crossfadeEnabled && isVideo,
                         modifier = Modifier.matchParentSize(),
                     )
-                    if (exporting) ExportSpinner()
+                    if (exporting) ExportProgress(exportProgress)
                 }
             } else {
                 Box(modifier = preview, contentAlignment = Alignment.Center) {
@@ -392,7 +402,7 @@ internal fun AndroidLyricsShareSheet(
                         crossfade = crossfadeEnabled && isVideo,
                         modifier = Modifier.matchParentSize(),
                     )
-                    if (exporting) ExportSpinner()
+                    if (exporting) ExportProgress(exportProgress)
                 }
             }
 
@@ -597,20 +607,31 @@ private enum class ShareBackground(@param:StringRes val label: Int, val source: 
     OTHER(R.string.lyrics_share_canvas, CanvasSource.OTHER),
 }
 
-/** Over the preview while the video is being made. */
+/**
+ * Over the preview while the video is being made (0.1-beta): the encoder's
+ * real percent with a bar, replacing the old indeterminate spinner, so a
+ * long render shows how far it has got instead of just that it is busy.
+ */
 @Composable
-private fun ExportSpinner() {
-    Box(
+private fun ExportProgress(percent: Int) {
+    Column(
         modifier = Modifier
-            .size(52.dp)
-            .clip(RoundedCornerShape(26.dp))
-            .background(Color.Black.copy(alpha = 0.35f)),
-        contentAlignment = Alignment.Center,
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(26.dp),
-            strokeWidth = 2.5.dp,
-            color = Color.White.copy(alpha = 0.85f),
+        Text(
+            text = "$percent%",
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White,
+        )
+        Spacer(Modifier.height(8.dp))
+        androidx.compose.material3.LinearProgressIndicator(
+            progress = { percent / 100f },
+            modifier = Modifier.width(140.dp),
+            color = Color.White.copy(alpha = 0.9f),
+            trackColor = Color.White.copy(alpha = 0.25f),
         )
     }
 }

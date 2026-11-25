@@ -46,14 +46,27 @@ object NeveraVocalMotion {
         }
         val totalWeight = weights.sum().coerceAtLeast(1f)
 
+        // Word boundaries first, from the cumulative weights, so every word
+        // owns exactly one slice of the vocal span and the slices tile it in
+        // order. The previous per-word build let a short word's end be pushed
+        // at least 70 ms out even when its own slice was shorter — past the
+        // next word's start — so on fast lines neighbouring words overlapped
+        // and the sweep stuttered back and forth between them (0.1-beta).
+        val boundaries = LongArray(tokens.size + 1)
+        boundaries[0] = start
         var cursor = start.toFloat()
+        for (i in tokens.indices) {
+            cursor += (weights[i] / totalWeight) * vocalSpanMs
+            boundaries[i + 1] = if (i == tokens.lastIndex) start + vocalSpanMs else cursor.toLong()
+        }
         val words = ArrayList<LyricWord>(tokens.size)
         for (i in tokens.indices) {
-            val dur = (weights[i] / totalWeight) * vocalSpanMs
-            val wStart = cursor.toLong()
-            val wEnd = (cursor + dur * 0.96f).toLong().coerceAtLeast(wStart + 70L)
+            val wStart = boundaries[i]
+            val sliceEnd = boundaries[i + 1].coerceAtLeast(wStart + 1L)
+            // Sung for 96% of its slice, resting on the boundary for the rest —
+            // but never past its own slice, however short the slice is.
+            val wEnd = (wStart + (sliceEnd - wStart) * 0.96f).toLong().coerceIn(wStart + 1L, sliceEnd)
             words += LyricWord(text = tokens[i], startMs = wStart, endMs = wEnd)
-            cursor += dur
         }
         return line.copy(
             words = words,

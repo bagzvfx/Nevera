@@ -10,8 +10,12 @@ import kotlin.math.tanh
  * Native C++17 Studio Mastering Loudness Maximizer + soft-knee true-peak limiter
  * + beat-onset bass/treble rhythm analyzer riding at the tail of [DspChain].
  *
- * Includes a ~185 ms AudioTrack output latency compensation ring buffer so the
- * visual glow pulses in exact lock-step with sound leaving the device speaker.
+ * Includes an output-latency compensation ring buffer so the visual glow
+ * pulses in lock-step with the sound the listener actually hears. The delay
+ * is not a fixed guess: it follows the active output route via
+ * [NeveraAudioBus.glowLatencyCompensationMs], which AudioOutputStatus sets
+ * per route — phone speaker, wired, USB, HDMI and Bluetooth all deliver
+ * sound with different latencies, Bluetooth by far the most.
  *
  * Self-bypasses cleanly when mastering boost is 0 dB and glow analysis is off,
  * preserving bit-exact PCM output. Falls back to pure Kotlin in JVM unit tests.
@@ -23,8 +27,9 @@ class NeveraMasteringProcessor {
     private val bandScratch = FloatArray(4)
     private var lastPublishNs: Long = 0L
 
-    // Tiny lock-free delay ring buffer compensating for Android AudioTrack output buffer
-    // (~185ms ahead of speaker output) so visual beats align tightly with audible kicks.
+    // Tiny lock-free delay ring buffer compensating for output latency by the
+    // route-based delay in NeveraAudioBus.glowLatencyCompensationMs, so visual
+    // beats align tightly with audible kicks on whatever route is active.
     private val ringReadyNs = LongArray(RING_SIZE)
     private val ringBass = FloatArray(RING_SIZE)
     private val ringTreble = FloatArray(RING_SIZE)
@@ -105,7 +110,9 @@ class NeveraMasteringProcessor {
         if (nextHead == ringTail) {
             ringTail = (ringTail + 1) and RING_MASK
         }
-        ringReadyNs[ringHead] = nowNs + AUDIO_LATENCY_COMPENSATION_NS
+        val compensationNs = NeveraAudioBus.glowLatencyCompensationMs.value
+            .coerceIn(0L, MAX_GLOW_LATENCY_COMPENSATION_MS) * NS_PER_MS
+        ringReadyNs[ringHead] = nowNs + compensationNs
         ringBass[ringHead] = bass
         ringTreble[ringHead] = treble
         ringSustain[ringHead] = sustain
@@ -125,7 +132,7 @@ class NeveraMasteringProcessor {
                 beat = ringBeat[emitIndex],
             )
         } else if (!nativeLoaded) {
-            // Unit-test path: publish immediately without waiting 185ms
+            // Unit-test path: publish immediately without waiting out the compensation delay
             NeveraAudioBus.publishAudioBands(bass, treble, sustain, beat)
         }
     }
@@ -175,7 +182,10 @@ class NeveraMasteringProcessor {
     companion object {
         const val MAX_BOOST_DB = 15f
         private const val PUBLISH_INTERVAL_NS = 12_000_000L // ~83 Hz ultra-responsive
-        private const val AUDIO_LATENCY_COMPENSATION_NS = 65_000_000L // ~65 ms tight AudioTrack kick lock
+        // The compensation itself is route-based and lives in
+        // NeveraAudioBus.glowLatencyCompensationMs; this is only its sane ceiling.
+        private const val MAX_GLOW_LATENCY_COMPENSATION_MS = 400L
+        private const val NS_PER_MS = 1_000_000L
         private const val RING_SIZE = 32
         private const val RING_MASK = RING_SIZE - 1
 

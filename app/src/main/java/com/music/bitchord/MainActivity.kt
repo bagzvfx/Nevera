@@ -588,6 +588,9 @@ private fun BitChordApp(
     // Explore loads the first time it's shown, not at launch beside Home.
     LaunchedEffect(selectedTab) {
         if (selectedTab == TAB_EXPLORE) viewModel.onExploreShown()
+        // The search page's pre-search recommendations (0.1-beta) load the
+        // first time Search is shown, beside Explore's own lazy load.
+        if (selectedTab == TAB_SEARCH) viewModel.loadSearchRecommendations()
     }
     /**
      * Whether the player's sheet is up. The player is always a full-screen
@@ -976,6 +979,7 @@ private fun BitChordApp(
     val lyricsChecked by viewModel.lyricsChecked.collectAsStateWithLifecycle()
     val lyricsProviderStates by viewModel.lyricsProviderStates.collectAsStateWithLifecycle()
     val searchHistory by viewModel.searchHistory.collectAsStateWithLifecycle()
+    val searchRecommendations by viewModel.searchRecommendations.collectAsStateWithLifecycle()
     val searchSuggestions by viewModel.suggestions.collectAsStateWithLifecycle()
     val searchLoadingMore by viewModel.searchLoadingMore.collectAsStateWithLifecycle()
     val searchScrollReset by viewModel.searchScrollReset.collectAsStateWithLifecycle()
@@ -3815,6 +3819,19 @@ private fun BitChordApp(
                                     }
                                 },
                                 history = searchHistory,
+                                recommendations = searchRecommendations,
+                                onRecommendationClick = { songs, index ->
+                                    songs.getOrNull(index)?.let { song ->
+                                        viewModel.recordEntity(SearchHistoryEntity(
+                                            id = song.videoId,
+                                            title = song.title,
+                                            subtitle = song.artist.ifEmpty { "" },
+                                            artworkUrl = song.thumbnailUrl,
+                                            entityType = EntityType.TRACK,
+                                        ))
+                                        playRadio(song, QueueSource(searchLabel, PlaybackSourceType.SEARCH))
+                                    }
+                                },
                                 suggestions = searchSuggestions,
                                 typeaheadResults = viewModel.typeaheadResults.collectAsStateWithLifecycle().value,
                                 onSubmit = viewModel::submitSearch,

@@ -419,6 +419,49 @@ object ListeningStats {
     private fun bucketsOf(month: YearMonth): List<StoredBucket> =
         listOfNotNull(read(month.toString())) + PeerListening.buckets(month.toString())
 
+    /**
+     * This device's own listening history, most recently played first — the
+     * local history the History page shows when nobody is signed in, and the
+     * fallback when the account history comes back empty.
+     *
+     * Built from the same buckets [ListeningRecorder] already writes for
+     * Replay: every entry carries when it was last played ([TrackEntry.last]),
+     * so a true recency order exists without a second store. Entries are
+     * merged across months by id, keeping the newest stamp and the freshest
+     * metadata, and songs the recorder never stamped (legacy buckets) sort
+     * last rather than pretending they were just played.
+     */
+    suspend fun recentLocalSongs(limit: Int = 100): List<Song> = withContext(Dispatchers.IO) {
+        if (!ready) return@withContext emptyList()
+        flushAndAwait()
+        val byId = LinkedHashMap<String, TrackEntry>()
+        for (month in months()) {
+            for (bucket in bucketsOf(month)) {
+                for (entry in bucket.tracks) {
+                    if (entry.title.isBlank()) continue
+                    val existing = byId[entry.id]
+                    if (existing == null || entry.last >= existing.last) {
+                        byId[entry.id] = entry
+                    }
+                }
+            }
+        }
+        byId.values
+            .sortedByDescending { it.last }
+            .take(limit.coerceAtLeast(1))
+            .map { entry ->
+                Song(
+                    videoId = entry.id,
+                    title = entry.title,
+                    artist = entry.artist,
+                    thumbnailUrl = entry.art,
+                    artistId = entry.artistId,
+                    albumId = entry.albumId,
+                    albumName = entry.album,
+                )
+            }
+    }
+
     /** Every month with a file, oldest first. */
     fun months(): List<YearMonth> {
         if (!ready) return emptyList()

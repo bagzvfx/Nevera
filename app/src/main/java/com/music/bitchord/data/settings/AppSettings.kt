@@ -453,7 +453,11 @@ object AppSettings {
     /** Audio-reactive bass/treble glow on the Now Playing screen. */
     val audioReactiveGlow = MutableStateFlow(true)
 
-    /** Automatically show Romaji when Japanese script is detected in lyrics. */
+    /**
+     * Automatically show the Latin reading of lyrics when Japanese, Korean,
+     * or Chinese script is detected — Romaji for Japanese, Korean
+     * romanization for Hangul, and Pinyin for Han characters.
+     */
     val autoJapaneseRomaji = MutableStateFlow(true)
 
     /** Floating lyrics overlay displayed above other apps. */

@@ -2120,30 +2120,77 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The account's listening history.
+     * The listening history page: the account's history when signed in, and
+     * this device's own history either way.
      *
      * Loaded on each visit rather than cached: it is a page whose whole subject
      * is what happened most recently, and one that opened showing the state it
-     * was in last time would be answering a different question. Guests get the
-     * signed-out message straight away, since there is no account to have a
-     * history on.
+     * was in last time would be answering a different question.
+     *
+     * Since 0.1-beta the page no longer requires sign-in. [ListeningRecorder]
+     * has always kept a local record for Replay, so a guest's history is that
+     * record, most recently played first ([ListeningStats.recentLocalSongs]).
+     * Signed in, the account history still wins; the local record is the
+     * fallback when the account answers empty or fails, so the page is never
+     * blank on a device that has actually played something.
      */
     fun loadHistory() {
-        if (!_signedIn.value) {
-            _history.value = UiState.Error(text(R.string.history_sign_in_required))
-            return
-        }
         val identity = listenerKey()
+        val signedIn = _signedIn.value
         _history.value = UiState.Loading
         viewModelScope.launch {
-            val next = YtMusicRepository.history().fold(
-                onSuccess = { songs ->
-                    if (songs.isEmpty()) UiState.Error(text(R.string.history_empty))
-                    else UiState.Success(songs)
-                },
-                onFailure = { UiState.Error(it.friendly()) },
-            )
+            val local = runCatching { ListeningStats.recentLocalSongs() }.getOrDefault(emptyList())
+            val next = if (signedIn) {
+                YtMusicRepository.history().fold(
+                    onSuccess = { songs ->
+                        when {
+                            songs.isNotEmpty() -> UiState.Success(songs)
+                            local.isNotEmpty() -> UiState.Success(local)
+                            else -> UiState.Error(text(R.string.history_empty))
+                        }
+                    },
+                    onFailure = {
+                        if (local.isNotEmpty()) UiState.Success(local)
+                        else UiState.Error(it.friendly())
+                    },
+                )
+            } else {
+                if (local.isNotEmpty()) UiState.Success(local)
+                else UiState.Error(text(R.string.history_empty))
+            }
             if (identity == listenerKey()) _history.value = next
+        }
+    }
+
+    // --- Search recommendations (0.1-beta) -----------------------------------
+
+    private val _searchRecommendations = MutableStateFlow<List<Song>>(emptyList())
+    /** What the search page offers before anything is typed: see [loadSearchRecommendations]. */
+    val searchRecommendations: StateFlow<List<Song>> = _searchRecommendations.asStateFlow()
+    private var searchRecommendationsLoaded = false
+
+    /**
+     * Fills the search page's pre-search shelf from this device's own taste:
+     * the most-played local tracks first (the strongest signal of what this
+     * listener likes), then YouTube's quick picks seeded by that taste with
+     * the already-played tracks left out, so the shelf mixes "play it again"
+     * with "try this next". Works signed out — everything here is local or
+     * anonymous — and is loaded once per process; the page is a starting
+     * point, not a feed.
+     */
+    fun loadSearchRecommendations() {
+        if (searchRecommendationsLoaded) return
+        searchRecommendationsLoaded = true
+        viewModelScope.launch {
+            val local = runCatching { ListeningStats.recentLocalSongs(limit = 30) }
+                .getOrDefault(emptyList())
+            val playedIds = local.mapTo(HashSet()) { it.videoId }
+            val picks = runCatching {
+                YtMusicRepository.quickPicks(excludeSongIds = playedIds).getOrDefault(emptyList())
+            }.getOrDefault(emptyList())
+            _searchRecommendations.value = (local.take(10) + picks)
+                .distinctBy { it.videoId }
+                .take(20)
         }
     }
 

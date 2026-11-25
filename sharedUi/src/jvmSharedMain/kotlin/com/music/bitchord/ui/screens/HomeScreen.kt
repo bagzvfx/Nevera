@@ -476,11 +476,13 @@ private fun HomeTitle(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    painter = painterResource(Res.drawable.ic_logo),
+                Image(
+                    painter = painterResource(Res.drawable.ic_nevera_launcher_img),
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onBackground,
-                    modifier = Modifier.size(30.dp),
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp)),
                 )
                 Spacer(Modifier.width(10.dp))
                 Text(

@@ -73,6 +73,8 @@ jobs:
         id: version
         run: |
           VER=$(grep 'bitchordVersionName' build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          SUFFIX=$(grep 'bitchordBetaSuffix' build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -n "$SUFFIX" ]; then VER="${VER}-${SUFFIX}"; fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           mkdir -p release-assets
           if [ "${{ steps.keystore.outputs.has_keystore }}" = "true" ]; then
@@ -103,13 +105,15 @@ jobs:
           body: |
             ## Nevera v${{ steps.version.outputs.version }}
 
-            - **2 Template 3D Baru di Share Lyric (Total 7 Template FX)**:
-              - **`3D Holo Deck`**: Deck CD/turntable akrilik transparan 3D dengan cincin LED putih-biru menyala, kartu cover orisinil melayang miring 3D (±21° tanpa logo Nevera), garis orbit cahaya, & lirik bergulir lembut tepat di belakang kartu.
-              - **`Projector`**: Lampu proyektor mini dengan sinar volumetrik *god-rays* & debu cahaya, lirik serif miring bergulir lembut dalam sorotan sinar, bintang orbit 4-sudut, serta kartu Polaroid 3D orisinil (dengan bintang & barcode).
-              - Ditambah 5 template sebelumnya (`3D Vinyl`, `3D Holo CD`, `3D Glass`, `3D Poster`, `Clean Story`).
-            - **Upgrade Besar Animasi & Timing Karaoke (Playback, Overlay & Share Lyric)**:
-              - **Auto Word-Timing Karaoke untuk SEMUA Lagu**: Bahkan lagu yang liriknya hanya memiliki *line-sync* (LRC biasa) kini otomatis mendapatkan sapuan karaoke halus per kata, gelombang cair *C² raised-cosine*, & peregangan glow nada vokal panjang!
-              - **Wavefront Light Tip + Liquid Pearl-Gold Sweep**: Cahaya ujung sapuan lembut mengikuti posisi vokal secara real-time di Playback, Borderless Overlay, maupun Share Lyric Video.
+            Perombakan besar Nevera: versi ini dirilis sebagai **0.1-beta**.
+
+            - **Histori Pemutaran Lokal**: Lagu yang kamu putar kini tercatat di perangkat tanpa perlu login / sign-in ke akun.
+            - **Rekomendasi di Pencarian**: Halaman pencarian menampilkan rekomendasi lagu berdasarkan kebiasaan mendengarmu, sebelum kamu mengetik apa pun.
+            - **Bacaan Lirik Otomatis**: Baris cara baca Latin untuk lirik Jepang (romaji), Korea (romanisasi), dan China (pinyin).
+            - **Glow Bass/Treble Lebih Sinkron**: Glow kini memakai kompensasi latency yang mengikuti perangkat output yang sedang dipakai, agar lebih seirama dengan bass.
+            - **Share Lyric Video**: Render share lyric menampilkan progress persen selama proses render berlangsung.
+            - **Logo Aplikasi di Header**: Ikon di samping tulisan Nevera kini memakai logo aplikasi Nevera.
+            - **Install Timpa Aman**: Tetap bisa dipasang langsung di atas versi sebelumnya tanpa uninstall, karena versionCode naik.
 
             **Pilih APK:**
             - `Nevera-v${{ steps.version.outputs.version }}-arm64.apk` (Direkomendasikan untuk mayoritas HP Android modern, lebih ringan)

@@ -296,7 +296,9 @@ object AudioOutputStatus {
             directPlaybackDetail = directSupport?.description,
             bluetoothTelemetry = bluetoothTelemetry,
         )
-        current.value = evaluateActualPath(baseSnapshot)
+        val evaluated = evaluateActualPath(baseSnapshot)
+        current.value = evaluated
+        updateGlowLatency(evaluated)
     }
 
     fun publishNegotiation(result: OutputNegotiationResult) {
@@ -335,7 +337,9 @@ object AudioOutputStatus {
             // the constants here overwrote the measurement within milliseconds
             // and left both rows reading "Float32" forever.
         )
-        current.value = evaluateActualPath(baseSnapshot)
+        val evaluated = evaluateActualPath(baseSnapshot)
+        current.value = evaluated
+        updateGlowLatency(evaluated)
     }
 
     /**
@@ -400,7 +404,32 @@ object AudioOutputStatus {
             bufferSize = bufferSize ?: current.value.bufferSize,
             floatFallback = current.value.requestedPcmMode == OutputPcmMode.FLOAT_32 && !isFloat,
         )
-        current.value = evaluateActualPath(baseSnapshot)
+        val evaluated = evaluateActualPath(baseSnapshot)
+        current.value = evaluated
+        updateGlowLatency(evaluated)
+    }
+
+    /**
+     * Points the bass/treble glow & waveform latency compensation at the delay
+     * of the route [snapshot] describes, by writing
+     * [NeveraAudioBus.glowLatencyCompensationMs] (same package, :shared module).
+     *
+     * A single fixed compensation cannot be right for every route — that is
+     * why the glow kept drifting out of sync with the bass whenever the output
+     * changed. Classic Bluetooth (A2DP) is by far the slowest route; LE Audio
+     * roughly halves it. Called from every publishing site that assigns a new
+     * snapshot through [evaluateActualPath], plus [reset].
+     */
+    internal fun updateGlowLatency(snapshot: Snapshot) {
+        NeveraAudioBus.glowLatencyCompensationMs.value = when (snapshot.routeKind) {
+            AudioRouting.Kind.PHONE -> 65L
+            AudioRouting.Kind.WIRED -> 45L
+            AudioRouting.Kind.USB -> 35L
+            AudioRouting.Kind.HDMI -> 90L
+            AudioRouting.Kind.BLUETOOTH ->
+                if (snapshot.bluetoothProfile == "LE Audio") 110L else 210L
+            AudioRouting.Kind.OTHER -> 65L
+        }
     }
 
     /**
@@ -576,6 +605,7 @@ object AudioOutputStatus {
 
     fun reset() {
         current.value = Snapshot()
+        updateGlowLatency(current.value)
     }
 
     fun encodingLabel(snapshot: Snapshot): String = when (snapshot.actualEncoding) {

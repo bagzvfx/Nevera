@@ -41,10 +41,16 @@ buildscript {
  * No "v" in the name — the in-app updater reads it as a number; the "v" is the
  * release tag's alone.
  */
-extra["bitchordVersionCode"] = 440
-extra["bitchordVersionName"] = "4.4.0"
+extra["bitchordVersionCode"] = 441
+extra["bitchordVersionName"] = "0.1"
 
 /*
+ * This is the v0.1-beta major overhaul: the suffix below is set to "beta",
+ * so the final displayed version is "0.1-beta". The versionCode above still
+ * rises (441, up from 440) even though the displayed name restarts at 0.1 —
+ * Android only installs an update over an existing install when the
+ * versionCode is higher, so this is what keeps install-over working.
+ *
  * Bump this by hand before cutting each sideloaded test build ("beta2",
  * "beta3", ...) and blank it out before cutting the real release. Marks the
  * versionName above as a pre-release: AppUpdateChecker.isNewer() treats any
@@ -63,7 +69,7 @@ extra["bitchordVersionName"] = "4.4.0"
  * the phone compares the watch's installed APK with the one it carries, so a
  * beta watch app shows "Update available" as soon as the phone has the release.
  */
-extra["bitchordBetaSuffix"] = ""
+extra["bitchordBetaSuffix"] = "beta"
 
 plugins {
     id("com.android.application") version "8.10.1" apply false

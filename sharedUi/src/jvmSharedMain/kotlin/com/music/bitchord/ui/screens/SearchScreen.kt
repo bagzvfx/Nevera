@@ -161,6 +161,15 @@ fun SearchScreen(
     onAddonHistoryClear: () -> Unit = {},
     /** The Library source's tracks for [query]; null while nothing is typed. */
     libraryResults: UiState<List<Song>>? = null,
+    /**
+     * Pre-search recommendations (0.1-beta): songs offered before anything is
+     * typed, chosen from this device's own listening — recently played tracks
+     * plus picks seeded by them. Shown above the recent searches while the
+     * field is empty; empty until the caller has any, and the page then looks
+     * exactly as it did before they existed.
+     */
+    recommendations: List<Song> = emptyList(),
+    onRecommendationClick: (List<Song>, Int) -> Unit = onSongClick,
     /** Files on the device are a running order to play through, not a station seed. */
     onLibrarySongClick: (List<Song>, Int) -> Unit = onSongClick,
     /**
@@ -305,19 +314,36 @@ fun SearchScreen(
                         )
                     }
                 }
-                results == null -> if (history.isEmpty()) {
-                    item { MessageState(stringResource(Res.string.search_empty)) }
-                } else {
-                    recentSearches(
-                        history = history,
-                        currentSong = currentSong,
-                        isPlaying = isPlaying,
-                        onClick = onHistoryClick,
-                        onSongLongPress = onSongLongPress,
-                        onRemove = onHistoryRemove,
-                        onClear = onHistoryClear,
-                        onSongSwipe = onSongSwipe,
-                    )
+                results == null -> {
+                    // Before anything is typed the page leads with what this
+                    // device's listening suggests (0.1-beta), then the recent
+                    // searches; with neither, the plain invitation to search.
+                    if (recommendations.isNotEmpty()) {
+                        recommendedSongs(
+                            songs = recommendations,
+                            currentSong = currentSong,
+                            isPlaying = isPlaying,
+                            onClick = onRecommendationClick,
+                            onSongLongPress = onSongLongPress,
+                            onSongSwipe = onSongSwipe,
+                        )
+                    }
+                    if (history.isEmpty()) {
+                        if (recommendations.isEmpty()) {
+                            item { MessageState(stringResource(Res.string.search_empty)) }
+                        }
+                    } else {
+                        recentSearches(
+                            history = history,
+                            currentSong = currentSong,
+                            isPlaying = isPlaying,
+                            onClick = onHistoryClick,
+                            onSongLongPress = onSongLongPress,
+                            onRemove = onHistoryRemove,
+                            onClear = onHistoryClear,
+                            onSongSwipe = onSongSwipe,
+                        )
+                    }
                 }
                 results is UiState.Loading -> songListSkeleton(circular = filter == SearchFilter.ARTISTS)
                 results is UiState.Error -> item { MessageState(results.message) }
@@ -806,6 +832,63 @@ private fun TypeaheadSongRow(
  * is empty — the same spot Spotify and Apple Music put it, and the reason the
  * blank search page isn't just a sentence any more.
  */
+/**
+ * The pre-search shelf (0.1-beta): recommendations from this device's own
+ * listening, drawn as ordinary song rows so a tap, a hold and a swipe behave
+ * exactly as they do on a result. Keyed on the video id plus position, the
+ * same total key the history list uses, so a repeated id can never crash the
+ * list.
+ */
+private fun LazyListScope.recommendedSongs(
+    songs: List<Song>,
+    currentSong: Song?,
+    isPlaying: Boolean,
+    onClick: (List<Song>, Int) -> Unit,
+    onSongLongPress: (Song) -> Unit,
+    onSongSwipe: (Song) -> Unit,
+) {
+    item(key = "recommended:header") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PAGE_GUTTER, vertical = 10.dp),
+        ) {
+            Text(
+                text = stringResource(Res.string.search_recommended_title),
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Text(
+                text = stringResource(Res.string.search_recommended_subtitle),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    val isCurrentRow = playingRowMatcher(songs, currentSong)
+    itemsIndexed(
+        items = songs,
+        key = { index, song -> "recommended:${song.videoId}:$index" },
+    ) { index, song ->
+        SongRow(
+            song = song,
+            onClick = { onClick(songs, index) },
+            onLongPress = { onSongLongPress(song) },
+            onSwipeToQueue = { onSongSwipe(song) },
+            isCurrent = isCurrentRow(song),
+            isPlaying = isPlaying && isCurrentRow(song),
+            searchPlayingStyle = true,
+        )
+        if (index < songs.lastIndex) {
+            HorizontalDivider(
+                modifier = Modifier.padding(start = ROW_DIVIDER_INSET),
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
+}
+
 private fun LazyListScope.recentSearches(
     history: List<SearchHistoryEntity>,
     currentSong: Song?,
