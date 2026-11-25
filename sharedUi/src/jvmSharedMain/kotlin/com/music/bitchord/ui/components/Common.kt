@@ -99,6 +99,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import coil3.request.ImageRequest
+import coil3.request.crossfade
 import coil3.size.Precision
 import com.music.bitchord.data.model.ROW_ART_PX
 import com.music.bitchord.data.model.Song

@@ -1035,7 +1035,7 @@ private fun SweptLyricLine(
  * peakAlpha × windowH × windowV: the middle of the box keeps exactly the
  * brightness it was given, and only the edges fall away.
  */
-private fun ContentDrawScope.featherGlowMask(
+private fun DrawScope.featherGlowMask(
     left: Float,
     top: Float,
     right: Float,
