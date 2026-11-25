@@ -257,7 +257,7 @@ object MusicVideoEngine {
      * one re-matched by song. Null when the deck is on another video, has no
      * picture for this one, or its minted URL has aged out ([STREAM_TTL_MS]).
      */
-    fun playingStreamFor(videoId: String): ShareMusicVideo? {
+    internal fun playingStreamFor(videoId: String): ShareMusicVideo? {
         if (loadedId != videoId) return null
         val (stream, _, at) = streams[videoId] ?: return null
         if (System.currentTimeMillis() - at > STREAM_TTL_MS) return null
